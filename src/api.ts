@@ -326,6 +326,19 @@ api.post('/installations', async (c) => {
     FROM site_parts sp JOIN sites s ON s.id = sp.site_id WHERE sp.id = ?
   `).bind(body.site_part_id).first<{ id: number; site_id: number; part: string; contractor: string; site_name: string }>()
   if (!sp) return c.json({ error: '部位が見つかりません' }, 400)
+
+  // === 重複チェック: 同じ現場・同じ部位・同じ取付日 ===
+  const dup = await c.env.DB.prepare(
+    'SELECT id FROM installations WHERE site_id = ? AND site_part_id = ? AND work_date = ? LIMIT 1'
+  ).bind(sp.site_id, sp.id, body.work_date).first<{ id: number }>()
+  if (dup) {
+    return c.json({
+      error: `すでに同じ取付日の同じ部位が登録されています\n元請: ${sp.contractor}\n現場名: ${sp.site_name}\n部位: ${sp.part}\n取付日: ${body.work_date}`,
+      duplicate: true,
+      existing_id: dup.id,
+    }, 400)
+  }
+
   const mp = Number(body.manpower) || 0
   const dv = Math.max(0, Math.floor(Number(body.delivery_vehicles) || 0))
   const cv = Math.max(0, Math.floor(Number(body.commute_vehicles) || 0))
@@ -362,6 +375,19 @@ api.put('/installations/:id', async (c) => {
     FROM site_parts sp JOIN sites s ON s.id = sp.site_id WHERE sp.id = ?
   `).bind(body.site_part_id).first<{ id: number; site_id: number; part: string; contractor: string; site_name: string }>()
   if (!sp) return c.json({ error: '部位が見つかりません' }, 400)
+
+  // === 重複チェック: 同じ現場・同じ部位・同じ取付日 (編集中の自分自身は除外) ===
+  const dup = await c.env.DB.prepare(
+    'SELECT id FROM installations WHERE site_id = ? AND site_part_id = ? AND work_date = ? AND id != ? LIMIT 1'
+  ).bind(sp.site_id, sp.id, body.work_date, id).first<{ id: number }>()
+  if (dup) {
+    return c.json({
+      error: `すでに同じ取付日の同じ部位が登録されています\n元請: ${sp.contractor}\n現場名: ${sp.site_name}\n部位: ${sp.part}\n取付日: ${body.work_date}`,
+      duplicate: true,
+      existing_id: dup.id,
+    }, 400)
+  }
+
   const mp = Number(body.manpower) || 0
   const dv = Math.max(0, Math.floor(Number(body.delivery_vehicles) || 0))
   const cv = Math.max(0, Math.floor(Number(body.commute_vehicles) || 0))
@@ -1035,6 +1061,18 @@ api.post('/import/commit', async (c) => {
           'INSERT INTO site_parts (site_id, part, quantity, note) VALUES (?, ?, ?, ?)'
         ).bind(site_id, part, newQty, '').run()
         site_part_id = r.meta.last_row_id as number
+      }
+
+      // === 重複チェック: 同じ現場・同じ部位・同じ取付日 ===
+      const dupIns = await c.env.DB.prepare(
+        'SELECT id FROM installations WHERE site_id = ? AND site_part_id = ? AND work_date = ? LIMIT 1'
+      ).bind(site_id, site_part_id, b.work_date).first<{ id: number }>()
+      if (dupIns) {
+        results.push({
+          index: i, ok: false,
+          error: `すでに同じ取付日の同じ部位が登録されています\n元請: ${contractor}\n現場名: ${site_name}\n部位: ${part}\n取付日: ${b.work_date}`,
+        })
+        continue
       }
 
       // 3. 取付実績 (installations) の登録

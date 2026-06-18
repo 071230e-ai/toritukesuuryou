@@ -549,7 +549,16 @@
       resetIxForm();
       await loadInstallations();
       await loadSuggestions();
-    } catch (e) { apiErr(e, '保存に失敗'); }
+    } catch (e) {
+      // 重複エラー (同じ現場・同じ部位・同じ取付日) は alert で多行表示
+      const data = e?.response?.data;
+      if (data?.duplicate) {
+        alert('【登録エラー】\n' + (data.error || 'すでに同じ取付日の同じ部位が登録されています'));
+        toast('重複エラー: 同じ取付日の同じ部位が既に登録されています', true);
+      } else {
+        apiErr(e, '保存に失敗');
+      }
+    }
   }
 
   async function editInstallation(id) {
@@ -867,6 +876,8 @@
         work_date: b.work_date || formDate || todayStr(),
         warnings: b.warnings || [],
         qty_strategy: 'overwrite', // 既存数量と異なる時のデフォルト
+        commit_status: '',   // ''=未登録, 'ok'=登録成功, 'ng'=登録失敗
+        commit_error: '',    // 登録失敗時のエラーメッセージ
       }));
       // 既存リスト最新化
       try {
@@ -907,6 +918,31 @@
       const qtyConflict = !!(existPart && Number(existPart.quantity) !== Number(b.quantity) && b.quantity > 0);
       const warnHtml = (b.warnings || []).length
         ? `<div class="text-[11px] text-orange-700 bg-orange-50 border border-orange-200 rounded px-2 py-1 mt-1"><i class="fas fa-triangle-exclamation mr-1"></i>${b.warnings.map(esc).join(' / ')}</div>` : '';
+
+      // 登録状態によりカードの枠色を変える
+      // - 'ok': 緑枠 + 登録済みバッジ
+      // - 'ng': 赤枠 + エラーバナー
+      // - '' : 通常
+      let cardCls = 'bg-white rounded-lg shadow border p-3';
+      let stateBadge = '';
+      let errBanner = '';
+      if (b.commit_status === 'ok') {
+        cardCls += ' border-green-400 bg-green-50';
+        stateBadge = `<span class="inline-flex items-center gap-1 bg-green-600 text-white text-[10px] rounded px-2 py-0.5 font-semibold"><i class="fas fa-check"></i>登録済み</span>`;
+      } else if (b.commit_status === 'ng') {
+        cardCls += ' border-red-400 border-2';
+        stateBadge = `<span class="inline-flex items-center gap-1 bg-red-600 text-white text-[10px] rounded px-2 py-0.5 font-semibold"><i class="fas fa-circle-exclamation"></i>登録エラー</span>`;
+        // エラーメッセージは改行を <br> に
+        const errText = esc(b.commit_error || '不明なエラー').replace(/\n/g, '<br>');
+        errBanner = `
+          <div class="text-[12px] text-red-800 bg-red-100 border border-red-300 rounded px-2 py-2 mt-2 leading-snug">
+            <div class="font-semibold mb-0.5"><i class="fas fa-circle-exclamation mr-1"></i>登録エラー</div>
+            <div>${errText}</div>
+          </div>`;
+      } else {
+        cardCls += ' border-slate-200';
+      }
+
       const matchHtml = [
         existSite ? `<span class="inline-block bg-blue-100 text-blue-800 text-[10px] rounded px-1.5 py-0.5 mr-1"><i class="fas fa-link mr-0.5"></i>既存現場に紐付け</span>` : `<span class="inline-block bg-green-100 text-green-800 text-[10px] rounded px-1.5 py-0.5 mr-1"><i class="fas fa-plus mr-0.5"></i>新規現場</span>`,
         existPart ? `<span class="inline-block bg-blue-100 text-blue-800 text-[10px] rounded px-1.5 py-0.5"><i class="fas fa-link mr-0.5"></i>既存部位 (現:${fmt(existPart.quantity)}kg)</span>` : (b.part ? `<span class="inline-block bg-green-100 text-green-800 text-[10px] rounded px-1.5 py-0.5"><i class="fas fa-plus mr-0.5"></i>新規部位</span>` : ''),
@@ -921,13 +957,17 @@
           </div>
         </div>` : '';
       return `
-        <div class="bg-white rounded-lg shadow border border-slate-200 p-3" data-im-card="${i}">
-          <div class="flex items-center justify-between mb-2">
-            <div class="text-xs text-slate-500">ブロック #${i + 1}</div>
+        <div class="${cardCls}" data-im-card="${i}">
+          <div class="flex items-center justify-between mb-2 gap-2">
+            <div class="flex items-center gap-2">
+              <div class="text-xs text-slate-500">ブロック #${i + 1}</div>
+              ${stateBadge}
+            </div>
             <div class="flex gap-1">
               <button type="button" class="text-xs bg-red-100 hover:bg-red-200 text-red-700 px-2 py-1 rounded" data-im-remove="${i}"><i class="fas fa-trash mr-0.5"></i>削除</button>
             </div>
           </div>
+          ${errBanner}
           <div class="mb-2">${matchHtml}</div>
           ${warnHtml}
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-2">
@@ -980,6 +1020,11 @@
     let v = el.value;
     if (field === 'quantity' || field === 'manpower') v = Number(v) || 0;
     state.importBlocks[i][field] = v;
+    // 内容を変更した瞬間、失敗状態 ('ng') を解除して再登録可能にする
+    if (state.importBlocks[i].commit_status === 'ng') {
+      state.importBlocks[i].commit_status = '';
+      state.importBlocks[i].commit_error = '';
+    }
     // 数量・部位・現場・元請の変更で既存マッチが変わる可能性 → 再描画(マッチバッジと衝突表示更新)
     if (field === 'contractor' || field === 'site_name' || field === 'part' || field === 'quantity') {
       // フォーカス維持のため最小再描画: 即座に renderImportBlocks() を呼ぶとフォーカスが飛ぶので debounce
@@ -1040,21 +1085,50 @@
 
   async function commitImport() {
     if (!state.importBlocks.length) { toast('登録する内容がありません', true); return; }
-    // バリデーション: 元請/現場名/取付日 が必須
-    const errors = [];
+
+    // 「未登録 + 失敗」のカードのみを対象にする
+    // (commit_status === 'ok' のカードは既に成功しているのでスキップ)
+    const targets = [];
     state.importBlocks.forEach((b, i) => {
-      if (!b.contractor?.trim()) errors.push(`#${i + 1}: 元請が空欄`);
-      if (!b.site_name?.trim())  errors.push(`#${i + 1}: 現場名が空欄`);
-      if (!b.work_date)          errors.push(`#${i + 1}: 取付日が空欄`);
+      if (b.commit_status === 'ok') return;
+      targets.push({ b, originalIdx: i });
     });
-    if (errors.length) {
-      alert('以下を修正してください:\n' + errors.join('\n'));
+    if (!targets.length) { toast('登録する内容がありません (すべて登録済みです)', true); return; }
+
+    // クライアントサイドの軽いバリデーション → 失敗扱いとしてカードに反映 (送信はしない)
+    const clientErrors = [];
+    targets.forEach(({ b, originalIdx }) => {
+      const errs = [];
+      if (!b.contractor?.trim()) errs.push('元請が空欄です');
+      if (!b.site_name?.trim())  errs.push('現場名が空欄です');
+      if (!b.part?.trim())       errs.push('部位が空欄です');
+      if (!b.work_date)          errs.push('取付日が空欄です');
+      if (errs.length) clientErrors.push({ originalIdx, msg: errs.join(' / ') });
+    });
+
+    if (!confirm(`${targets.length} 件を登録します。よろしいですか？`)) return;
+
+    // クライアントエラー分は失敗カードとしてマーク
+    clientErrors.forEach(({ originalIdx, msg }) => {
+      const b = state.importBlocks[originalIdx];
+      if (b) {
+        b.commit_status = 'ng';
+        b.commit_error = msg;
+      }
+    });
+
+    // クライアントエラーが無いカードだけサーバへ送信
+    const serverTargets = targets.filter(t => !clientErrors.find(ce => ce.originalIdx === t.originalIdx));
+
+    if (!serverTargets.length) {
+      // 全件クライアントエラー
+      renderImportBlocks();
+      toast('入力エラーがあります。各カードのエラー内容を確認してください', true);
       return;
     }
-    if (!confirm(`${state.importBlocks.length} 件を登録します。よろしいですか？`)) return;
 
-    // workers_text → workers 配列 に変換
-    const blocks = state.importBlocks.map(b => ({
+    // 送信用ペイロード (送信順 index → originalIdx の対応表)
+    const blocks = serverTargets.map(({ b }) => ({
       contractor: b.contractor.trim(),
       site_name: b.site_name.trim(),
       part: (b.part || '').trim(),
@@ -1070,28 +1144,55 @@
     try {
       const { data } = await api.post('/import/commit', { blocks });
       const results = data?.results || [];
-      const okCount  = results.filter(r => r.ok).length;
-      const ngCount  = results.length - okCount;
-      const noteList = results.filter(r => r.note).map(r => `#${r.index + 1}: ${r.note}`);
-      const errList  = results.filter(r => !r.ok).map(r => `#${r.index + 1}: ${r.error || '不明エラー'}`);
-      let msg = `登録完了: 成功 ${okCount} 件 / 失敗 ${ngCount} 件`;
-      if (noteList.length) msg += '\n\n[備考]\n' + noteList.join('\n');
-      if (errList.length)  msg += '\n\n[エラー]\n' + errList.join('\n');
-      alert(msg);
-      // クリア
-      state.importBlocks = [];
-      $('#im-text').value = '';
-      $('#im-result-wrap')?.classList.add('hidden');
-      $('#im-list').innerHTML = '';
-      $('#im-summary').textContent = '0';
+
+      // 結果を元のカードに反映 (送信時の index → originalIdx)
+      results.forEach((r) => {
+        const target = serverTargets[r.index];
+        if (!target) return;
+        const b = state.importBlocks[target.originalIdx];
+        if (!b) return;
+        if (r.ok) {
+          b.commit_status = 'ok';
+          b.commit_error = '';
+        } else {
+          b.commit_status = 'ng';
+          b.commit_error = r.error || '不明なエラー';
+        }
+      });
+
+      // 全体集計 (クライアントエラー + サーバ結果)
+      const okCount = state.importBlocks.filter(b => b.commit_status === 'ok').length;
+      const ngCount = state.importBlocks.filter(b => b.commit_status === 'ng').length;
+
       // 既存リスト更新 + サジェスト再取得
       try {
         const ex = await api.get('/import/existing');
         state.importExisting = ex.data || { sites: [], site_parts: [] };
       } catch {}
       await loadSuggestions();
-      toast(`登録完了 (成功 ${okCount} 件)`);
+
+      if (ngCount === 0) {
+        // 全件成功 → 読み取り結果をクリア
+        const totalOk = okCount;
+        state.importBlocks = [];
+        $('#im-text').value = '';
+        $('#im-result-wrap')?.classList.add('hidden');
+        $('#im-list').innerHTML = '';
+        $('#im-summary').textContent = '0';
+        alert(`登録完了: ${totalOk} 件すべて成功しました`);
+        toast(`登録完了 (${totalOk} 件成功)`);
+      } else {
+        // 一部失敗 → 成功カードは画面から消し、失敗カードのみ残す
+        state.importBlocks = state.importBlocks.filter(b => b.commit_status !== 'ok');
+        // 残ったカードは「失敗」状態。表示用にインデックスを振り直すが、commit_status は維持
+        state.importBlocks.forEach((b, k) => (b.idx = k));
+        $('#im-summary').textContent = String(state.importBlocks.length);
+        renderImportBlocks();
+        alert(`登録完了: 成功 ${okCount} 件 / 失敗 ${ngCount} 件\n失敗したデータを修正して再度「DBに登録」を押してください`);
+        toast(`成功 ${okCount} 件 / 失敗 ${ngCount} 件`, true);
+      }
     } catch (e) {
+      // ネットワーク等の致命的エラー: 状態は触らない
       apiErr(e, '一括登録に失敗しました');
     }
   }
