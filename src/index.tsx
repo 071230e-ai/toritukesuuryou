@@ -9,7 +9,57 @@ app.use(renderer)
 
 app.get('/', (c) => {
   return c.render(
-    <div class="min-h-screen flex flex-col">
+    <>
+      {/* ============== ログイン画面（最初に表示） ============== */}
+      <div id="login-screen" class="fixed inset-0 z-[100] bg-gradient-to-br from-blue-800 to-blue-500 flex items-center justify-center p-4">
+        <div class="w-full max-w-sm bg-white rounded-2xl shadow-2xl p-6 sm:p-8">
+          <div class="text-center mb-6">
+            <div class="w-16 h-16 mx-auto mb-3 bg-yellow-400 rounded-full flex items-center justify-center shadow-md">
+              <i class="fas fa-hard-hat text-blue-900 text-3xl"></i>
+            </div>
+            <div class="text-xs text-slate-500">村田鉄筋㈱</div>
+            <h1 class="text-lg font-bold text-slate-800 mt-1">取付数量分析アプリ</h1>
+            <div class="text-xs text-slate-500 mt-2"><i class="fas fa-lock mr-1"></i>ログインしてください</div>
+          </div>
+          <form id="login-form" class="space-y-4" autocomplete="off">
+            <div>
+              <label for="login-pw" class="block text-sm font-semibold text-slate-700 mb-1">パスワード</label>
+              <div class="relative">
+                <input
+                  type="password"
+                  id="login-pw"
+                  required
+                  autocomplete="current-password"
+                  inputmode="text"
+                  class="w-full border-2 border-slate-300 rounded-lg px-3 py-3 pr-12 text-base focus:border-blue-500"
+                  placeholder="パスワードを入力"
+                />
+                <button
+                  type="button"
+                  id="login-pw-toggle"
+                  aria-label="パスワード表示切替"
+                  class="absolute right-2 top-1/2 -translate-y-1/2 px-2 py-1 text-slate-500 hover:text-slate-700"
+                >
+                  <i class="fas fa-eye"></i>
+                </button>
+              </div>
+              <div id="login-error" class="text-red-600 text-sm mt-2 hidden">
+                <i class="fas fa-circle-exclamation mr-1"></i>パスワードが違います
+              </div>
+            </div>
+            <button
+              type="submit"
+              class="w-full bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-bold py-3 rounded-lg text-base shadow-md"
+            >
+              <i class="fas fa-right-to-bracket mr-2"></i>ログイン
+            </button>
+          </form>
+          <div class="text-[10px] text-slate-400 text-center mt-5">© 村田鉄筋㈱</div>
+        </div>
+      </div>
+
+      {/* ============== アプリ本体（ログイン後に表示） ============== */}
+      <div id="app-root" class="min-h-screen flex flex-col hidden">
       {/* ヘッダ */}
       <header class="bg-gradient-to-r from-blue-800 to-blue-600 text-white shadow-lg sticky top-0 z-40">
         <div class="max-w-7xl mx-auto px-3 py-3 flex items-center justify-between">
@@ -20,9 +70,14 @@ app.get('/', (c) => {
               <div class="text-base sm:text-lg font-bold leading-tight">取付数量分析アプリ</div>
             </div>
           </div>
-          <button id="new-site-btn" class="bg-yellow-400 hover:bg-yellow-300 text-blue-900 font-bold rounded-full px-3 py-2 text-sm shadow-md">
-            <i class="fas fa-plus mr-1"></i>現場を追加
-          </button>
+          <div class="flex items-center gap-2">
+            <button id="new-site-btn" class="bg-yellow-400 hover:bg-yellow-300 text-blue-900 font-bold rounded-full px-3 py-2 text-sm shadow-md">
+              <i class="fas fa-plus mr-1"></i>現場を追加
+            </button>
+            <button id="logout-btn" title="ログアウト" class="bg-white/10 hover:bg-white/20 text-white rounded-full px-3 py-2 text-sm">
+              <i class="fas fa-right-from-bracket"></i><span class="hidden sm:inline ml-1">ログアウト</span>
+            </button>
+          </div>
         </div>
         <nav class="bg-blue-900/90 overflow-x-auto">
           <div class="max-w-7xl mx-auto px-1 flex gap-1 min-w-max">
@@ -433,9 +488,10 @@ app.get('/', (c) => {
       </div>
 
       <footer class="bg-slate-200 text-slate-500 text-center text-xs py-3">© 村田鉄筋㈱ 取付数量分析アプリ</footer>
+      </div>{/* /#app-root */}
 
       <script src="/static/app.js"></script>
-    </div>
+    </>
   )
 })
 

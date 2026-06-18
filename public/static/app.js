@@ -921,18 +921,114 @@
   }
 
   // ============================================================
-  // 起動
+  // 認証ゲート (シンプルなフロントエンドパスワード)
   // ============================================================
-  async function init() {
+  const AUTH_PASSWORD = 'torituke';
+  const AUTH_KEY = 'murata_rebar_auth_v1';
+  let appInitialized = false;
+
+  function isAuthed() {
+    try {
+      return localStorage.getItem(AUTH_KEY) === '1' || sessionStorage.getItem(AUTH_KEY) === '1';
+    } catch { return false; }
+  }
+  function setAuthed() {
+    try { localStorage.setItem(AUTH_KEY, '1'); } catch {}
+  }
+  function clearAuthed() {
+    try { localStorage.removeItem(AUTH_KEY); } catch {}
+    try { sessionStorage.removeItem(AUTH_KEY); } catch {}
+  }
+
+  function showLogin() {
+    const login = $('#login-screen');
+    const root  = $('#app-root');
+    if (login) login.classList.remove('hidden');
+    if (root)  root.classList.add('hidden');
+    setTimeout(() => $('#login-pw')?.focus(), 50);
+  }
+
+  function hideLogin() {
+    const login = $('#login-screen');
+    const root  = $('#app-root');
+    if (login) login.classList.add('hidden');
+    if (root)  root.classList.remove('hidden');
+  }
+
+  function bindLoginEvents() {
+    const form = $('#login-form');
+    const pw   = $('#login-pw');
+    const err  = $('#login-error');
+    const tgl  = $('#login-pw-toggle');
+
+    // 入力中はエラー非表示
+    pw?.addEventListener('input', () => err?.classList.add('hidden'));
+
+    // パスワード表示切替
+    tgl?.addEventListener('click', () => {
+      if (!pw) return;
+      const isPw = pw.type === 'password';
+      pw.type = isPw ? 'text' : 'password';
+      tgl.innerHTML = isPw ? '<i class="fas fa-eye-slash"></i>' : '<i class="fas fa-eye"></i>';
+    });
+
+    form?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const val = (pw?.value || '');
+      if (val === AUTH_PASSWORD) {
+        setAuthed();
+        if (pw) pw.value = '';
+        hideLogin();
+        await enterApp();
+      } else {
+        err?.classList.remove('hidden');
+        if (pw) { pw.focus(); pw.select(); }
+      }
+    });
+
+    // ログアウトボタン (ヘッダ内、app-root配下)
+    $('#logout-btn')?.addEventListener('click', () => {
+      if (!confirm('ログアウトしますか？')) return;
+      clearAuthed();
+      // 各種state をリセット
+      state.currentSite = null;
+      state.currentPart = null;
+      showLogin();
+    });
+  }
+
+  async function enterApp() {
+    if (appInitialized) {
+      // 再ログイン時は最新データを表示するため sites を再ロード
+      showTab('sites');
+      return;
+    }
+    appInitialized = true;
     bindEvents();
     await loadParts(false);
     await loadSuggestions();
     showTab('sites');
   }
 
+  async function bootstrap() {
+    bindLoginEvents();
+    if (isAuthed()) {
+      hideLogin();
+      await enterApp();
+    } else {
+      showLogin();
+    }
+  }
+
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init);
+    document.addEventListener('DOMContentLoaded', bootstrap);
   } else {
-    init();
+    bootstrap();
+  }
+
+  // --- 開発/QA 用: URL ハッシュ #reset-auth で認証状態を消去できる ---
+  if (typeof window !== 'undefined' && window.location && window.location.hash === '#reset-auth') {
+    clearAuthed();
+    window.location.hash = '';
   }
 })();
