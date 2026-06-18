@@ -9,10 +9,10 @@
   3. その部位の中に **取付日・人員名・人工数・搬入車両・通勤車両** を登録
 - **技術スタック**: Hono + TypeScript + Cloudflare Pages + Cloudflare D1 (SQLite) + TailwindCSS + Chart.js
 
-## プレビューURL
+## URL
+- **本番 (Cloudflare Pages)**: https://project-0e7e600c.pages.dev ✅ 稼働中
 - **開発サーバー (Sandbox)**: https://3000-irspu06ujj17fuypg508e-583b4d74.sandbox.novita.ai
-- **本番**: 未デプロイ（指示があるまで本番デプロイは行いません）
-- **GitHub**: 未プッシュ（指示があるまでプッシュは行いません）
+- **GitHub**: https://github.com/071230e-ai/toritukesuuryou
 
 ## データ登録の流れ（3階層）
 ```
@@ -245,7 +245,9 @@ npm run db:console:local       # ローカルD1コンソール
 
 ## デプロイ状況
 - **プラットフォーム**: Cloudflare Pages (D1 連携)
-- **ローカル状態**: ✅ 起動中 (`pm2 list` で `webapp` が online)
-- **本番状態**: ❌ 未デプロイ（**ユーザーの指示待ち**）
-- **GitHub**: ❌ 未プッシュ（**ユーザーの指示待ち**）
-- **最終更新**: 2026-06-18（3階層構造へリファクタ）
+- **本番URL**: ✅ https://project-0e7e600c.pages.dev
+- **本番 D1**: `webapp-rebar-installations` (UUID: `771cde8d-9f0d-4a8c-b171-b33c5aff7e29`)
+  - スマホ・PC・別端末から本番URL経由で同じデータベースを共有
+- **ローカル状態**: ✅ サンドボックスで起動中 (PM2)
+- **GitHub**: ✅ https://github.com/071230e-ai/toritukesuuryou
+- **最終更新**: 2026-06-18（3階層構造 + 本番デプロイ）
