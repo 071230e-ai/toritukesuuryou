@@ -1,565 +1,938 @@
-// 村田鉄筋㈱ 取付数量分析アプリ
-// 構成: 現場登録 → 現場詳細(取付実績) → ダッシュボード/分析
+/* 村田鉄筋㈱ 取付数量分析アプリ v3 (3階層: 現場 → 部位・数量 → 取付実績) */
 (() => {
   'use strict';
 
-  const $ = (sel) => document.querySelector(sel);
-  const $$ = (sel) => document.querySelectorAll(sel);
+  const $  = (s, root = document) => root.querySelector(s);
+  const $$ = (s, root = document) => Array.from(root.querySelectorAll(s));
   const fmt = (n, d = 0) => {
-    if (n === null || n === undefined || isNaN(n)) return '0';
-    return Number(n).toLocaleString('ja-JP', { minimumFractionDigits: d, maximumFractionDigits: Math.max(d, 2) });
+    const v = Number(n) || 0;
+    return v.toLocaleString('ja-JP', { minimumFractionDigits: d, maximumFractionDigits: Math.max(d, 2) });
   };
-  const fmtKg = (n) => fmt(n, 0);
-  const fmtMp = (n) => fmt(n, 1);
+  const fmtInt = (n) => (Number(n) || 0).toLocaleString('ja-JP');
+  const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
 
-  function toast(msg, type = 'info') {
-    const t = $('#toast'), body = $('#toast-body');
-    body.textContent = msg;
-    body.className = `text-white text-sm px-4 py-2 rounded-full shadow-lg ${
-      type === 'error' ? 'bg-red-600' : type === 'success' ? 'bg-green-700' : 'bg-slate-900'
-    }`;
-    t.classList.remove('hidden');
-    clearTimeout(toast._t);
-    toast._t = setTimeout(() => t.classList.add('hidden'), 2400);
-  }
-
-  const api = {
-    get: (p) => axios.get('/api' + p).then(r => r.data),
-    post: (p, d) => axios.post('/api' + p, d).then(r => r.data),
-    put: (p, d) => axios.put('/api' + p, d).then(r => r.data),
-    del: (p) => axios.delete('/api' + p).then(r => r.data),
-  };
+  const api = axios.create({ baseURL: '/api' });
 
   const state = {
-    parts: [],
-    workers: [],
-    sites: [],
-    currentSite: null,
-    sdWorkers: [],
-    sdEditingId: null,
+    parts: [],          // 部位マスタ
+    workers: [],        // 人員名サジェスト
+    sites: [],          // 現場一覧
+    currentSite: null,  // {id, contractor, site_name, note}
+    siteParts: [],      // 現在の現場の部位
+    currentPart: null,  // {id, site_id, part, quantity, contractor, site_name}
+    installations: [],  // 現在の部位の取付実績
+    ixWorkers: [],      // 取付実績フォームに現在追加されている人員名
     charts: {},
-    analysisData: null,
-    sdInstallations: [],
   };
 
-  // ---------- Tabs ----------
+  // ============================================================
+  // Toast
+  // ============================================================
+  function toast(msg, isError = false) {
+    const t = $('#toast'); const b = $('#toast-body');
+    if (!t || !b) return;
+    b.textContent = msg;
+    b.className = isError
+      ? 'bg-red-600 text-white text-sm px-4 py-2 rounded-full shadow-lg'
+      : 'bg-slate-900 text-white text-sm px-4 py-2 rounded-full shadow-lg';
+    t.classList.remove('hidden');
+    setTimeout(() => t.classList.add('hidden'), 2200);
+  }
+  const apiErr = (e, fallback) => toast((e?.response?.data?.error) || fallback || '通信エラー', true);
+
+  // ============================================================
+  // Tab / Breadcrumb
+  // ============================================================
   function showTab(name) {
-    $$('.tab-pane').forEach(p => p.classList.add('hidden'));
-    $('#tab-' + name)?.classList.remove('hidden');
+    $$('.tab-pane').forEach(el => el.classList.add('hidden'));
+    const pane = $('#tab-' + name);
+    if (pane) pane.classList.remove('hidden');
+
+    // 上部タブのハイライト（sites/dashboard/analysis/settings のみ）
     $$('.tab-btn').forEach(b => {
-      const active = b.dataset.tab === name;
-      b.classList.toggle('border-yellow-400', active);
-      b.classList.toggle('border-transparent', !active);
+      const t = b.dataset.tab;
+      const active = (t === name);
       b.classList.toggle('text-white', active);
       b.classList.toggle('text-white/80', !active);
+      b.classList.toggle('border-yellow-400', active);
+      b.classList.toggle('border-transparent', !active);
     });
-    if (name === 'sites') loadSites();
-    if (name === 'dashboard') loadDashboard();
-    if (name === 'analysis') loadAnalysis();
-    if (name === 'settings') loadParts(true);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  }
-  $$('.tab-btn').forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
-  $('#new-site-btn').addEventListener('click', () => openSiteModal());
 
-  // ---------- マスタ取得 ----------
-  async function refreshMasters() {
-    const [parts, sugg] = await Promise.all([api.get('/parts'), api.get('/suggestions')]);
-    state.parts = parts;
-    state.workers = sugg.workers;
-    // 部位 select (現場詳細フォーム)
-    $('#sd-f-part').innerHTML = parts.map(p => `<option value="${escapeHtml(p.name)}">${escapeHtml(p.name)}</option>`).join('');
-    // 部位 select (分析フィルタ)
-    const anPart = $('#an-part');
-    if (anPart) anPart.innerHTML = '<option value="">すべて</option>' + parts.map(p => `<option value="${escapeHtml(p.name)}">${escapeHtml(p.name)}</option>`).join('');
-    // 人員名 datalist
-    $('#dl-workers').innerHTML = state.workers.map(v => `<option value="${escapeHtml(v)}">`).join('');
-    // 分析フィルタ 人員select
-    const anWorker = $('#an-worker');
-    if (anWorker) anWorker.innerHTML = '<option value="">すべて</option>' + state.workers.map(v => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join('');
+    renderBreadcrumb(name);
+
+    if (name === 'sites')        loadSites();
+    if (name === 'dashboard')    loadDashboard();
+    if (name === 'analysis')     loadAnalysis();
+    if (name === 'settings')     loadParts(true);
   }
 
-  // =====================================================
-  // 現場一覧
-  // =====================================================
+  function renderBreadcrumb(name) {
+    const bc = $('#breadcrumb');
+    if (!bc) return;
+    const parts = [];
+    parts.push(`<a href="#" data-bc="sites" class="hover:underline"><i class="fas fa-home mr-1"></i>現場一覧</a>`);
+    if ((name === 'site-parts' || name === 'installations') && state.currentSite) {
+      parts.push('<i class="fas fa-chevron-right text-[10px] mx-1"></i>');
+      parts.push(`<a href="#" data-bc="site-parts" class="hover:underline">${esc(state.currentSite.contractor)} / ${esc(state.currentSite.site_name)}</a>`);
+    }
+    if (name === 'installations' && state.currentPart) {
+      parts.push('<i class="fas fa-chevron-right text-[10px] mx-1"></i>');
+      parts.push(`<span>${esc(state.currentPart.part)} (${fmt(state.currentPart.quantity)}kg)</span>`);
+    }
+    const visible = (name === 'site-parts' || name === 'installations');
+    bc.classList.toggle('hidden', !visible);
+    bc.innerHTML = parts.join('');
+  }
+
+  // ============================================================
+  // 部位マスタ
+  // ============================================================
+  async function loadParts(renderList = false) {
+    try {
+      const { data } = await api.get('/parts');
+      state.parts = data || [];
+      // 部位選択肢を更新
+      const opt = ['<option value="">部位を選択</option>']
+        .concat(state.parts.map(p => `<option value="${esc(p.name)}">${esc(p.name)}</option>`))
+        .join('');
+      const spfPart = $('#sp-f-part'); if (spfPart) spfPart.innerHTML = opt;
+      // 設定タブ
+      if (renderList) {
+        const ul = $('#part-list');
+        if (ul) {
+          ul.innerHTML = state.parts.length
+            ? state.parts.map(p => `
+                <li class="flex items-center gap-2 px-3 py-2">
+                  <span class="flex-1 text-sm">${esc(p.name)}</span>
+                  <button data-part-edit="${p.id}" data-name="${esc(p.name)}" class="text-xs bg-slate-200 hover:bg-slate-300 px-2 py-1 rounded"><i class="fas fa-pen"></i></button>
+                  <button data-part-del="${p.id}" class="text-xs bg-red-100 hover:bg-red-200 text-red-700 px-2 py-1 rounded"><i class="fas fa-trash"></i></button>
+                </li>`).join('')
+            : '<li class="px-3 py-2 text-sm text-slate-500">部位がありません</li>';
+        }
+      }
+    } catch (e) { apiErr(e, '部位マスタの取得に失敗'); }
+  }
+
+  async function addPart() {
+    const input = $('#part-input');
+    const name = (input?.value || '').trim();
+    if (!name) { toast('部位名を入力してください', true); return; }
+    try {
+      await api.post('/parts', { name });
+      input.value = '';
+      toast('追加しました');
+      await loadParts(true);
+    } catch (e) { apiErr(e, '追加に失敗'); }
+  }
+  async function editPart(id, currentName) {
+    const name = prompt('部位名を変更', currentName);
+    if (!name || name.trim() === currentName) return;
+    try {
+      await api.put('/parts/' + id, { name: name.trim() });
+      toast('更新しました');
+      await loadParts(true);
+    } catch (e) { apiErr(e, '更新に失敗'); }
+  }
+  async function deletePart(id) {
+    if (!confirm('この部位を削除します。よろしいですか？')) return;
+    try {
+      await api.delete('/parts/' + id);
+      toast('削除しました');
+      await loadParts(true);
+    } catch (e) { apiErr(e, '削除に失敗'); }
+  }
+
+  // ============================================================
+  // 人員名サジェスト
+  // ============================================================
+  async function loadSuggestions() {
+    try {
+      const { data } = await api.get('/suggestions');
+      state.workers = data?.workers || [];
+      const dl = $('#dl-workers');
+      if (dl) dl.innerHTML = state.workers.map(w => `<option value="${esc(w)}"></option>`).join('');
+      const sel = $('#an-worker');
+      if (sel) {
+        const cur = sel.value;
+        sel.innerHTML = '<option value="">すべて</option>' + state.workers.map(w => `<option value="${esc(w)}">${esc(w)}</option>`).join('');
+        sel.value = cur;
+      }
+    } catch (e) { /* silent */ }
+  }
+
+  // ============================================================
+  // ① 現場一覧
+  // ============================================================
   async function loadSites() {
-    const search = $('#sites-search').value.trim();
-    const q = search ? '?search=' + encodeURIComponent(search) : '';
-    const sites = await api.get('/sites' + q);
-    state.sites = sites;
-    const container = $('#sites-list');
-    if (!sites.length) {
-      container.innerHTML = `
+    try {
+      const search = ($('#sites-search')?.value || '').trim();
+      const { data } = await api.get('/sites', { params: search ? { search } : {} });
+      state.sites = data || [];
+      renderSitesList();
+    } catch (e) { apiErr(e, '現場一覧の取得に失敗'); }
+  }
+
+  function renderSitesList() {
+    const list = $('#sites-list'); if (!list) return;
+    if (!state.sites.length) {
+      list.innerHTML = `
         <div class="col-span-full bg-white rounded-lg shadow p-8 text-center text-slate-500">
-          <i class="fas fa-folder-open text-4xl text-slate-300 mb-3"></i>
-          <div class="text-base font-semibold">まだ現場が登録されていません</div>
-          <div class="text-sm mt-1">右上の「現場を追加」ボタンから最初の現場を登録してください。</div>
+          <i class="fas fa-folder-open text-3xl mb-3 text-slate-300"></i>
+          <p class="text-sm">現場が登録されていません</p>
+          <p class="text-xs mt-1">右上の「現場を新規登録」から追加してください</p>
         </div>`;
-      // 分析画面の元請/現場セレクトも更新
-      updateAnalysisSelectors([]);
       return;
     }
-    container.innerHTML = sites.map(s => {
-      const per = (s.total_mp > 0) ? (s.total_qty / s.total_mp) : null;
+    list.innerHTML = state.sites.map(s => {
+      const totalQty = Number(s.total_qty) || 0;
+      const totalMp  = Number(s.total_mp)  || 0;
+      const perMp = totalMp > 0 ? (totalQty / totalMp) : null;
       return `
-      <div class="bg-white rounded-lg shadow hover:shadow-md transition p-4">
-        <div class="flex items-start justify-between gap-2">
+      <div class="bg-white rounded-lg shadow hover:shadow-md transition p-3 flex flex-col gap-2">
+        <div class="flex items-start gap-2">
           <div class="flex-1 min-w-0">
-            <div class="text-xs text-slate-500">${escapeHtml(s.contractor)}</div>
-            <div class="text-lg font-bold text-slate-800 truncate">${escapeHtml(s.site_name)}</div>
-            ${s.note ? `<div class="text-xs text-slate-500 mt-1 truncate">${escapeHtml(s.note)}</div>` : ''}
+            <div class="text-xs text-slate-500 truncate">${esc(s.contractor)}</div>
+            <div class="text-base font-bold text-blue-800 truncate">${esc(s.site_name)}</div>
           </div>
-          <div class="flex flex-col gap-1">
-            <button data-edit-site="${s.id}" class="btn-mini btn-edit" title="編集"><i class="fas fa-pen"></i></button>
-            <button data-del-site="${s.id}" class="btn-mini btn-del" title="削除"><i class="fas fa-trash"></i></button>
+          <div class="flex gap-1 shrink-0">
+            <button data-site-edit="${s.id}" class="text-xs bg-slate-200 hover:bg-slate-300 px-2 py-1 rounded" title="編集"><i class="fas fa-pen"></i></button>
+            <button data-site-del="${s.id}" class="text-xs bg-red-100 hover:bg-red-200 text-red-700 px-2 py-1 rounded" title="削除"><i class="fas fa-trash"></i></button>
           </div>
         </div>
-        <div class="grid grid-cols-4 gap-1 mt-3 text-center">
-          <div><div class="text-[10px] text-slate-400">取付日数</div><div class="text-sm font-bold text-slate-700">${s.work_days}</div></div>
-          <div><div class="text-[10px] text-slate-400">数量(kg)</div><div class="text-sm font-bold text-blue-700">${fmtKg(s.total_qty)}</div></div>
-          <div><div class="text-[10px] text-slate-400">人工</div><div class="text-sm font-bold text-green-700">${fmtMp(s.total_mp)}</div></div>
-          <div><div class="text-[10px] text-slate-400">kg/人工</div><div class="text-sm font-bold text-orange-600">${per === null ? '<span class="text-slate-400 text-xs">未計算</span>' : fmtKg(per)}</div></div>
+        <div class="grid grid-cols-4 gap-1 text-center">
+          <div class="bg-slate-50 rounded p-1.5">
+            <div class="text-[10px] text-slate-500">部位</div>
+            <div class="text-sm font-bold text-slate-700">${fmtInt(s.parts_count)}</div>
+          </div>
+          <div class="bg-slate-50 rounded p-1.5">
+            <div class="text-[10px] text-slate-500">登録数量</div>
+            <div class="text-sm font-bold text-blue-700">${fmt(totalQty)}<span class="text-[10px] font-normal"> kg</span></div>
+          </div>
+          <div class="bg-slate-50 rounded p-1.5">
+            <div class="text-[10px] text-slate-500">合計人工</div>
+            <div class="text-sm font-bold text-green-700">${fmt(totalMp, totalMp % 1 ? 1 : 0)}</div>
+          </div>
+          <div class="bg-slate-50 rounded p-1.5">
+            <div class="text-[10px] text-slate-500">kg/人工</div>
+            <div class="text-sm font-bold text-orange-600">${perMp !== null ? fmt(perMp) : '<span class="text-xs text-slate-400">未計算</span>'}</div>
+          </div>
         </div>
-        <button data-open-site="${s.id}" class="mt-3 w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 rounded text-sm">
-          <i class="fas fa-pen-to-square mr-1"></i>取付実績を入力／確認
+        <button data-site-open="${s.id}" class="mt-1 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold py-2 rounded">
+          <i class="fas fa-folder-open mr-1"></i>部位・数量を登録／表示
         </button>
       </div>`;
     }).join('');
-    $$('#sites-list [data-open-site]').forEach(b => b.addEventListener('click', () => openSiteDetail(b.dataset.openSite)));
-    $$('#sites-list [data-edit-site]').forEach(b => b.addEventListener('click', () => editSite(b.dataset.editSite)));
-    $$('#sites-list [data-del-site]').forEach(b => b.addEventListener('click', () => deleteSite(b.dataset.delSite)));
-
-    updateAnalysisSelectors(sites);
-  }
-  $('#sites-search').addEventListener('input', debounce(loadSites, 200));
-  $('#sites-new').addEventListener('click', () => openSiteModal());
-
-  function updateAnalysisSelectors(sites) {
-    const contractors = [...new Set(sites.map(s => s.contractor))].sort();
-    const siteNames = [...new Set(sites.map(s => s.site_name))].sort();
-    const anC = $('#an-contractor'), anS = $('#an-site');
-    if (anC) anC.innerHTML = '<option value="">すべて</option>' + contractors.map(v => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join('');
-    if (anS) anS.innerHTML = '<option value="">すべて</option>' + siteNames.map(v => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join('');
   }
 
-  // ---------- 現場モーダル ----------
+  // ============================================================
+  // Site Modal (現場 新規/編集)
+  // ============================================================
   function openSiteModal(site) {
     $('#sm-id').value = site?.id || '';
     $('#sm-contractor').value = site?.contractor || '';
-    $('#sm-site-name').value = site?.site_name || '';
-    $('#sm-note').value = site?.note || '';
+    $('#sm-site-name').value  = site?.site_name  || '';
+    $('#sm-note').value       = site?.note       || '';
     $('#site-modal-title').textContent = site ? '現場を編集' : '現場を登録';
-    $('#sm-submit-label').textContent = site ? '更新する' : '登録する';
-    $('#site-modal').classList.remove('hidden');
-    $('#site-modal').classList.add('flex');
+    $('#sm-submit-label').textContent  = site ? '更新する' : '登録する';
+    const m = $('#site-modal');
+    m.classList.remove('hidden'); m.classList.add('flex');
     setTimeout(() => $('#sm-contractor').focus(), 50);
   }
   function closeSiteModal() {
-    $('#site-modal').classList.add('hidden');
-    $('#site-modal').classList.remove('flex');
+    const m = $('#site-modal');
+    m.classList.add('hidden'); m.classList.remove('flex');
   }
-  $('#site-modal-close').addEventListener('click', closeSiteModal);
-  $('#site-modal-cancel').addEventListener('click', closeSiteModal);
-  $('#site-modal').addEventListener('click', (e) => { if (e.target.id === 'site-modal') closeSiteModal(); });
-
-  $('#site-form').addEventListener('submit', async (e) => {
+  async function submitSite(e) {
     e.preventDefault();
     const id = $('#sm-id').value;
     const payload = {
       contractor: $('#sm-contractor').value.trim(),
-      site_name: $('#sm-site-name').value.trim(),
-      note: $('#sm-note').value.trim(),
+      site_name:  $('#sm-site-name').value.trim(),
+      note:       $('#sm-note').value.trim(),
     };
-    if (!payload.contractor || !payload.site_name) { toast('元請と現場名は必須です', 'error'); return; }
     try {
       if (id) {
         await api.put('/sites/' + id, payload);
-        toast('現場情報を更新しました', 'success');
+        toast('更新しました');
       } else {
         await api.post('/sites', payload);
-        toast('現場を登録しました', 'success');
+        toast('登録しました');
       }
       closeSiteModal();
-      loadSites();
-    } catch (err) {
-      toast(err?.response?.data?.error || '保存に失敗しました', 'error');
-    }
-  });
-
+      await loadSites();
+    } catch (e) { apiErr(e, '保存に失敗'); }
+  }
   async function editSite(id) {
-    const site = state.sites.find(s => String(s.id) === String(id));
-    if (!site) return;
-    openSiteModal(site);
+    try {
+      const { data } = await api.get('/sites/' + id);
+      openSiteModal(data);
+    } catch (e) { apiErr(e, '取得に失敗'); }
   }
   async function deleteSite(id) {
-    const site = state.sites.find(s => String(s.id) === String(id));
-    if (!site) return;
-    const hasData = site.row_count > 0;
-    const msg = hasData
-      ? `「${site.contractor} / ${site.site_name}」を削除します。\nこの現場には ${site.row_count} 件の取付実績があります。\n実績も含めてすべて削除してよろしいですか？`
-      : `「${site.contractor} / ${site.site_name}」を削除します。よろしいですか？`;
-    if (!confirm(msg)) return;
+    if (!confirm('この現場を削除します。配下に部位・取付実績がある場合はそれらも削除されます。よろしいですか？')) return;
     try {
-      await api.del('/sites/' + id + (hasData ? '?force=1' : ''));
-      toast('削除しました', 'success');
-      loadSites();
-    } catch (err) {
-      toast(err?.response?.data?.error || '削除に失敗しました', 'error');
-    }
-  }
-
-  // =====================================================
-  // 現場詳細 (取付実績入力)
-  // =====================================================
-  async function openSiteDetail(siteId) {
-    const site = await api.get('/sites/' + siteId);
-    state.currentSite = site;
-    $('#sd-contractor').textContent = site.contractor;
-    $('#sd-site-name').textContent = site.site_name;
-    $('#sd-f-site-id').value = site.id;
-    resetSdForm();
-    await loadSiteInstallations(site.id);
-    showTab('site-detail');
-  }
-  $('#back-to-sites').addEventListener('click', () => showTab('sites'));
-  $('#sd-edit-site').addEventListener('click', () => {
-    if (state.currentSite) openSiteModal(state.currentSite);
-  });
-
-  async function loadSiteInstallations(siteId) {
-    const list = await api.get('/sites/' + siteId + '/installations');
-    state.sdInstallations = list;
-    // サマリ
-    let totalQty = 0, totalMp = 0;
-    const dateSet = new Set();
-    list.forEach(d => { totalQty += d.quantity; totalMp += d.manpower; dateSet.add(d.work_date); });
-    $('#sd-days').textContent = dateSet.size;
-    $('#sd-qty').textContent = fmtKg(totalQty);
-    $('#sd-mp').textContent = fmtMp(totalMp);
-    $('#sd-per').textContent = totalMp > 0 ? fmtKg(totalQty / totalMp) : '未計算';
-
-    // 一覧
-    const tbody = $('#sd-install-list');
-    if (!list.length) {
-      tbody.innerHTML = '<tr><td colspan="6" class="text-center text-slate-400 py-6">取付実績はまだありません。上のフォームから追加してください。</td></tr>';
-      return;
-    }
-    tbody.innerHTML = list.map(d => `
-      <tr class="border-t">
-        <td class="px-2 py-2 whitespace-nowrap">${formatDate(d.work_date)}</td>
-        <td class="px-2 py-2">${escapeHtml(d.part)}</td>
-        <td class="px-2 py-2 text-right">${fmtKg(d.quantity)}<span class="text-xs text-slate-400">kg</span></td>
-        <td class="px-2 py-2 text-right">${fmtMp(d.manpower)}</td>
-        <td class="px-2 py-2 text-xs">${(d.workers || []).map(escapeHtml).join('、')}</td>
-        <td class="px-2 py-2 text-center whitespace-nowrap">
-          <button class="btn-mini btn-edit" data-edit="${d.id}"><i class="fas fa-edit"></i></button>
-          <button class="btn-mini btn-del" data-del="${d.id}"><i class="fas fa-trash"></i></button>
-        </td>
-      </tr>`).join('');
-    tbody.querySelectorAll('[data-edit]').forEach(b => b.addEventListener('click', () => sdEditInstall(b.dataset.edit)));
-    tbody.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', () => sdDeleteInstall(b.dataset.del)));
-  }
-
-  function resetSdForm() {
-    state.sdWorkers = [];
-    state.sdEditingId = null;
-    $('#sd-f-id').value = '';
-    $('#sd-f-date').value = dayjs().format('YYYY-MM-DD');
-    $('#sd-f-qty').value = '';
-    $('#sd-f-mp').value = '';
-    $('#sd-f-note').value = '';
-    $('#sd-f-worker-input').value = '';
-    $('#sd-submit-label').textContent = '追加する';
-    $('#sd-form-title').textContent = '取付実績を追加';
-    renderSdChips();
-  }
-  $('#sd-reset').addEventListener('click', resetSdForm);
-
-  function renderSdChips() {
-    const c = $('#sd-worker-chips');
-    if (!state.sdWorkers.length) {
-      c.innerHTML = '<span class="text-xs text-slate-400">未入力</span>';
-      return;
-    }
-    c.innerHTML = state.sdWorkers.map((w, i) =>
-      `<span class="chip">${escapeHtml(w)}<button type="button" data-i="${i}" aria-label="削除">×</button></span>`
-    ).join('');
-    c.querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
-      state.sdWorkers.splice(Number(b.dataset.i), 1);
-      renderSdChips();
-    }));
-  }
-  $('#sd-add-worker').addEventListener('click', sdAddWorker);
-  $('#sd-f-worker-input').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') { e.preventDefault(); sdAddWorker(); }
-  });
-  function sdAddWorker() {
-    const input = $('#sd-f-worker-input');
-    const name = input.value.trim();
-    if (!name) return;
-    if (!state.sdWorkers.includes(name)) state.sdWorkers.push(name);
-    input.value = '';
-    input.focus();
-    renderSdChips();
-  }
-
-  $('#sd-form').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    if (!state.currentSite) return;
-    const payload = {
-      site_id: state.currentSite.id,
-      work_date: $('#sd-f-date').value,
-      part: $('#sd-f-part').value,
-      quantity: parseFloat($('#sd-f-qty').value),
-      manpower: parseFloat($('#sd-f-mp').value),
-      note: $('#sd-f-note').value,
-      workers: state.sdWorkers.slice(),
-    };
-    if (!payload.work_date || !payload.part) { toast('取付日と部位を入力してください', 'error'); return; }
-    if (!(payload.quantity >= 0) || !(payload.manpower >= 0)) { toast('数量と人員を正しく入力してください', 'error'); return; }
-    try {
-      if (state.sdEditingId) {
-        await api.put('/installations/' + state.sdEditingId, payload);
-        toast('更新しました', 'success');
-      } else {
-        await api.post('/installations', payload);
-        toast('追加しました', 'success');
-      }
-      resetSdForm();
-      await refreshMasters();
-      await loadSiteInstallations(state.currentSite.id);
-    } catch (err) {
-      toast(err?.response?.data?.error || '保存に失敗しました', 'error');
-    }
-  });
-
-  async function sdEditInstall(id) {
-    const d = await api.get('/installations/' + id);
-    state.sdEditingId = d.id;
-    state.sdWorkers = d.workers || [];
-    $('#sd-f-id').value = d.id;
-    $('#sd-f-date').value = d.work_date;
-    $('#sd-f-part').value = d.part;
-    $('#sd-f-qty').value = d.quantity;
-    $('#sd-f-mp').value = d.manpower;
-    $('#sd-f-note').value = d.note || '';
-    $('#sd-submit-label').textContent = '更新する';
-    $('#sd-form-title').textContent = '取付実績を編集';
-    renderSdChips();
-    window.scrollTo({ top: $('#sd-form').offsetTop - 80, behavior: 'smooth' });
-  }
-  async function sdDeleteInstall(id) {
-    if (!confirm('この取付実績を削除します。よろしいですか？')) return;
-    await api.del('/installations/' + id);
-    toast('削除しました', 'success');
-    await refreshMasters();
-    await loadSiteInstallations(state.currentSite.id);
-  }
-
-  $('#sd-export').addEventListener('click', () => {
-    if (!state.sdInstallations.length) { toast('データがありません'); return; }
-    const site = state.currentSite;
-    const rows = [['取付日', '元請', '現場名', '部位', '数量(kg)', '人員(人工)', '人員名', '備考']];
-    state.sdInstallations.forEach(d => rows.push([
-      d.work_date, site.contractor, site.site_name, d.part, d.quantity, d.manpower,
-      (d.workers || []).join(' / '), d.note || ''
-    ]));
-    downloadCsv(`${site.contractor}_${site.site_name}_` + dayjs().format('YYYYMMDD') + '.csv', rows);
-  });
-
-  // =====================================================
-  // ダッシュボード
-  // =====================================================
-  async function loadDashboard() {
-    const q = new URLSearchParams();
-    if ($('#dash-from').value) q.set('from', $('#dash-from').value);
-    if ($('#dash-to').value) q.set('to', $('#dash-to').value);
-    const d = await api.get('/analytics/dashboard?' + q.toString());
-    const total = d.total || { total_qty: 0, total_mp: 0 };
-    $('#kpi-total-qty').textContent = fmtKg(total.total_qty);
-    $('#kpi-total-mp').textContent = fmtMp(total.total_mp);
-    $('#kpi-per-mp').textContent = total.total_mp > 0 ? fmtKg(total.total_qty / total.total_mp) : '未計算';
-
-    drawBar('chart-contractor', d.byContractor, '#2563eb');
-    drawBar('chart-site', d.bySite, '#0d9488', (r) => `${r.name}（${r.contractor}）`);
-    drawBar('chart-part', d.byPart, '#7c3aed');
-    drawBar('chart-worker', d.byWorker, '#16a34a');
-  }
-  $('#dash-apply').addEventListener('click', loadDashboard);
-  $('#dash-clear').addEventListener('click', () => {
-    $('#dash-from').value = ''; $('#dash-to').value = ''; loadDashboard();
-  });
-
-  function drawBar(canvasId, rows, color, labelFn) {
-    const ctx = document.getElementById(canvasId);
-    if (!ctx) return;
-    if (state.charts[canvasId]) state.charts[canvasId].destroy();
-    const data = rows || [];
-    const labels = data.map(r => labelFn ? labelFn(r) : r.name);
-    const values = data.map(r => Math.round(Number(r.qty) || 0));
-    state.charts[canvasId] = new Chart(ctx, {
-      type: 'bar',
-      data: { labels, datasets: [{ label: '取付数量(kg)', data: values, backgroundColor: color, borderRadius: 4 }] },
-      options: {
-        indexAxis: 'y',
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: { legend: { display: false }, tooltip: { callbacks: { label: (ctx) => fmt(ctx.parsed.x) + ' kg' } } },
-        scales: { x: { ticks: { callback: (v) => fmt(v) } } }
-      }
-    });
-  }
-
-  // =====================================================
-  // 集計・分析
-  // =====================================================
-  async function loadAnalysis() {
-    const q = currentAnalysisQuery();
-    const [sites, details] = await Promise.all([
-      api.get('/analytics/sites?' + q),
-      api.get('/installations?' + q),
-    ]);
-    let totalQty = 0, totalMp = 0;
-    sites.forEach(s => { totalQty += s.total_qty; totalMp += s.total_mp; });
-    const per = totalMp > 0 ? totalQty / totalMp : null;
-    $('#an-summary').innerHTML = `
-      <div class="bg-white rounded-lg shadow p-3"><div class="text-xs text-slate-500">合計数量</div><div class="text-xl font-bold text-blue-700">${fmtKg(totalQty)} <span class="text-xs font-normal">kg</span></div></div>
-      <div class="bg-white rounded-lg shadow p-3"><div class="text-xs text-slate-500">合計人工数</div><div class="text-xl font-bold text-green-700">${fmtMp(totalMp)} <span class="text-xs font-normal">人工</span></div></div>
-      <div class="bg-white rounded-lg shadow p-3"><div class="text-xs text-slate-500">1人工あたり</div><div class="text-xl font-bold text-orange-600">${per === null ? '<span class="text-slate-400 text-sm">未計算</span>' : fmtKg(per) + ' <span class="text-xs font-normal">kg/人工</span>'}</div></div>
-    `;
-
-    $('#an-site-summary').innerHTML = sites.length === 0
-      ? '<tr><td colspan="6" class="text-center text-slate-400 py-4">データがありません</td></tr>'
-      : sites.map(s => {
-          const p = s.total_mp > 0 ? s.total_qty / s.total_mp : null;
-          return `<tr class="border-t">
-            <td class="px-2 py-2">${escapeHtml(s.contractor)}</td>
-            <td class="px-2 py-2 font-semibold">${escapeHtml(s.site_name)}</td>
-            <td class="px-2 py-2 text-right">${s.work_days}</td>
-            <td class="px-2 py-2 text-right">${fmtKg(s.total_qty)}</td>
-            <td class="px-2 py-2 text-right">${fmtMp(s.total_mp)}</td>
-            <td class="px-2 py-2 text-right font-bold text-orange-600">${p === null ? '<span class="text-slate-400 text-xs">未計算</span>' : fmtKg(p)}</td>
-          </tr>`;
-        }).join('');
-
-    $('#an-detail').innerHTML = details.length === 0
-      ? '<tr><td colspan="7" class="text-center text-slate-400 py-4">データがありません</td></tr>'
-      : details.map(d => `<tr class="border-t">
-          <td class="px-2 py-2 whitespace-nowrap">${formatDate(d.work_date)}</td>
-          <td class="px-2 py-2">${escapeHtml(d.contractor)}</td>
-          <td class="px-2 py-2">${escapeHtml(d.site_name)}</td>
-          <td class="px-2 py-2">${escapeHtml(d.part)}</td>
-          <td class="px-2 py-2 text-right">${fmtKg(d.quantity)}<span class="text-xs text-slate-400">kg</span></td>
-          <td class="px-2 py-2 text-right">${fmtMp(d.manpower)}</td>
-          <td class="px-2 py-2 text-xs">${(d.workers || []).map(escapeHtml).join('、')}</td>
-        </tr>`).join('');
-
-    state.analysisData = { sites, details };
-  }
-
-  function currentAnalysisQuery() {
-    const q = new URLSearchParams();
-    if ($('#an-from').value) q.set('from', $('#an-from').value);
-    if ($('#an-to').value) q.set('to', $('#an-to').value);
-    if ($('#an-contractor').value) q.set('contractor', $('#an-contractor').value);
-    if ($('#an-site').value) q.set('site', $('#an-site').value);
-    if ($('#an-part').value) q.set('part', $('#an-part').value);
-    if ($('#an-worker').value) q.set('worker', $('#an-worker').value);
-    return q.toString();
-  }
-  $('#an-apply').addEventListener('click', loadAnalysis);
-  $('#an-clear').addEventListener('click', () => {
-    ['an-from','an-to','an-contractor','an-site','an-part','an-worker'].forEach(id => { $('#' + id).value = ''; });
-    loadAnalysis();
-  });
-  $('#an-export').addEventListener('click', () => {
-    if (!state.analysisData) return;
-    const rows = [['取付日', '元請', '現場名', '部位', '数量(kg)', '人員(人工)', '人員名', '備考']];
-    state.analysisData.details.forEach(d => rows.push([
-      d.work_date, d.contractor, d.site_name, d.part, d.quantity, d.manpower,
-      (d.workers || []).join(' / '), d.note || ''
-    ]));
-    rows.push([]);
-    rows.push(['【元請・現場別サマリ】']);
-    rows.push(['元請', '現場名', '取付日数', '合計数量(kg)', '合計人工数', '1人工あたり(kg/人工)']);
-    state.analysisData.sites.forEach(s => {
-      const p = s.total_mp > 0 ? s.total_qty / s.total_mp : '';
-      rows.push([s.contractor, s.site_name, s.work_days, s.total_qty, s.total_mp, p === '' ? '未計算' : Math.round(p)]);
-    });
-    downloadCsv('analysis_' + dayjs().format('YYYYMMDD_HHmm') + '.csv', rows);
-  });
-
-  // =====================================================
-  // 部位設定
-  // =====================================================
-  async function loadParts(refresh) {
-    if (refresh) await refreshMasters();
-    const ul = $('#part-list');
-    ul.innerHTML = state.parts.map(p => `
-      <li class="flex items-center gap-2 px-3 py-2">
-        <input type="text" value="${escapeHtml(p.name)}" data-pid="${p.id}" class="part-name flex-1 border rounded px-2 py-1 text-sm" />
-        <button data-save="${p.id}" class="btn-mini btn-edit"><i class="fas fa-save"></i></button>
-        <button data-del-part="${p.id}" class="btn-mini btn-del"><i class="fas fa-trash"></i></button>
-      </li>`).join('');
-    ul.querySelectorAll('[data-save]').forEach(b => b.addEventListener('click', async () => {
-      const id = b.dataset.save;
-      const name = ul.querySelector(`.part-name[data-pid="${id}"]`).value.trim();
-      if (!name) return;
-      await api.put('/parts/' + id, { name });
-      toast('部位を更新しました', 'success');
-      loadParts(true);
-    }));
-    ul.querySelectorAll('[data-del-part]').forEach(b => b.addEventListener('click', async () => {
-      if (!confirm('この部位を削除します。よろしいですか？\n※既存の取付実績の部位名は残ります。')) return;
-      await api.del('/parts/' + b.dataset.delPart);
-      toast('削除しました', 'success');
-      loadParts(true);
-    }));
-  }
-  $('#part-add').addEventListener('click', async () => {
-    const name = $('#part-input').value.trim();
-    if (!name) { toast('部位名を入力してください', 'error'); return; }
-    try {
-      await api.post('/parts', { name });
-      $('#part-input').value = '';
-      toast('部位を追加しました', 'success');
-      loadParts(true);
-    } catch {
-      toast('追加に失敗しました（重複の可能性）', 'error');
-    }
-  });
-
-  // =====================================================
-  // Utils
-  // =====================================================
-  function escapeHtml(s) {
-    return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
-  }
-  function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
-  function formatDate(s) {
-    if (!s) return '';
-    return dayjs(s).format('YYYY/M/D');
-  }
-  function downloadCsv(filename, rows) {
-    const csv = rows.map(r => r.map(c => {
-      const s = String(c ?? '');
-      return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
-    }).join(',')).join('\r\n');
-    const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = filename; a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }
-
-  // ---------- Init ----------
-  (async () => {
-    try {
-      await refreshMasters();
+      await api.delete('/sites/' + id);
+      toast('削除しました');
       await loadSites();
     } catch (e) {
-      console.error('init error', e);
-      toast('初期化に失敗しました', 'error');
+      // 配下データありの場合は force
+      if (e?.response?.status === 400) {
+        const c = e.response.data?.count;
+        if (confirm(`配下に ${c} 件の部位/取付実績があります。全て削除して構いませんか？`)) {
+          try {
+            await api.delete('/sites/' + id + '?force=1');
+            toast('削除しました');
+            await loadSites();
+          } catch (e2) { apiErr(e2, '削除に失敗'); }
+          return;
+        }
+      }
+      apiErr(e, '削除に失敗');
     }
-  })();
+  }
+
+  // ============================================================
+  // ② 部位・数量 (site-parts)
+  // ============================================================
+  async function openSitePartsScreen(siteId) {
+    try {
+      const { data: site } = await api.get('/sites/' + siteId);
+      state.currentSite = site;
+      $('#sp-contractor').textContent = site.contractor;
+      $('#sp-site-name').textContent  = site.site_name;
+      resetSpForm();
+      await loadParts(false);
+      await loadSiteParts();
+      showTab('site-parts');
+    } catch (e) { apiErr(e, '現場の読み込みに失敗'); }
+  }
+
+  async function loadSiteParts() {
+    if (!state.currentSite) return;
+    try {
+      const { data } = await api.get(`/sites/${state.currentSite.id}/parts`);
+      state.siteParts = data || [];
+      renderSitePartsList();
+    } catch (e) { apiErr(e, '部位一覧の取得に失敗'); }
+  }
+
+  function renderSitePartsList() {
+    const tb = $('#sp-list'); if (!tb) return;
+    if (!state.siteParts.length) {
+      tb.innerHTML = '<tr><td colspan="8" class="px-2 py-4 text-center text-slate-500 text-sm">部位が登録されていません</td></tr>';
+      return;
+    }
+    tb.innerHTML = state.siteParts.map(sp => {
+      const qty = Number(sp.quantity) || 0;
+      const mp  = Number(sp.total_mp) || 0;
+      const per = mp > 0 ? (qty / mp) : null;
+      return `
+        <tr class="border-b hover:bg-slate-50">
+          <td class="px-2 py-2 font-semibold">${esc(sp.part)}</td>
+          <td class="px-2 py-2 text-right">${fmt(qty)}</td>
+          <td class="px-2 py-2 text-right">${fmtInt(sp.work_days)}</td>
+          <td class="px-2 py-2 text-right">${fmt(mp, mp % 1 ? 1 : 0)}</td>
+          <td class="px-2 py-2 text-right ${per === null ? 'text-slate-400' : 'text-orange-600 font-semibold'}">${per !== null ? fmt(per) : '未計算'}</td>
+          <td class="px-2 py-2 text-right">${fmtInt(sp.delivery_vehicles)}</td>
+          <td class="px-2 py-2 text-right">${fmtInt(sp.commute_vehicles)}</td>
+          <td class="px-2 py-2 text-center whitespace-nowrap">
+            <button data-sp-open="${sp.id}" class="text-xs bg-blue-600 hover:bg-blue-700 text-white px-2 py-1 rounded" title="取付実績"><i class="fas fa-hammer"></i></button>
+            <button data-sp-edit="${sp.id}" class="text-xs bg-slate-200 hover:bg-slate-300 px-2 py-1 rounded ml-1" title="編集"><i class="fas fa-pen"></i></button>
+            <button data-sp-del="${sp.id}" class="text-xs bg-red-100 hover:bg-red-200 text-red-700 px-2 py-1 rounded ml-1" title="削除"><i class="fas fa-trash"></i></button>
+          </td>
+        </tr>`;
+    }).join('');
+  }
+
+  function resetSpForm() {
+    $('#sp-f-id').value = '';
+    $('#sp-f-part').value = '';
+    $('#sp-f-qty').value = '';
+    $('#sp-f-note').value = '';
+    $('#sp-form-title').textContent = '部位・数量を追加';
+    $('#sp-submit-label').textContent = '追加する';
+  }
+
+  async function submitSitePart(e) {
+    e.preventDefault();
+    if (!state.currentSite) return;
+    const id = $('#sp-f-id').value;
+    const payload = {
+      part: $('#sp-f-part').value.trim(),
+      quantity: Number($('#sp-f-qty').value),
+      note: $('#sp-f-note').value.trim(),
+    };
+    if (!payload.part) { toast('部位を選択してください', true); return; }
+    if (!(payload.quantity >= 0)) { toast('数量は0以上で入力してください', true); return; }
+    try {
+      if (id) {
+        await api.put('/site-parts/' + id, payload);
+        toast('更新しました');
+      } else {
+        await api.post(`/sites/${state.currentSite.id}/parts`, payload);
+        toast('追加しました');
+      }
+      resetSpForm();
+      await loadSiteParts();
+    } catch (e) { apiErr(e, '保存に失敗'); }
+  }
+
+  function editSitePart(id) {
+    const sp = state.siteParts.find(x => x.id == id);
+    if (!sp) return;
+    $('#sp-f-id').value   = sp.id;
+    $('#sp-f-part').value = sp.part;
+    $('#sp-f-qty').value  = sp.quantity;
+    $('#sp-f-note').value = sp.note || '';
+    $('#sp-form-title').textContent = '部位・数量を編集';
+    $('#sp-submit-label').textContent = '更新する';
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  async function deleteSitePart(id) {
+    if (!confirm('この部位を削除します。よろしいですか？')) return;
+    try {
+      await api.delete('/site-parts/' + id);
+      toast('削除しました');
+      await loadSiteParts();
+    } catch (e) {
+      if (e?.response?.status === 400) {
+        const c = e.response.data?.count;
+        if (confirm(`配下に ${c} 件の取付実績があります。全て削除して構いませんか？`)) {
+          try {
+            await api.delete('/site-parts/' + id + '?force=1');
+            toast('削除しました');
+            await loadSiteParts();
+          } catch (e2) { apiErr(e2, '削除に失敗'); }
+          return;
+        }
+      }
+      apiErr(e, '削除に失敗');
+    }
+  }
+
+  // ============================================================
+  // ③ 取付実績 (installations)
+  // ============================================================
+  async function openInstallationsScreen(sitePartId) {
+    try {
+      const { data: sp } = await api.get('/site-parts/' + sitePartId);
+      state.currentPart = sp;
+      state.currentSite = { id: sp.site_id, contractor: sp.contractor, site_name: sp.site_name };
+      $('#ix-contractor').textContent = sp.contractor;
+      $('#ix-site-name').textContent  = sp.site_name;
+      $('#ix-part').textContent       = sp.part;
+      $('#ix-reg-qty').textContent    = fmt(sp.quantity);
+      resetIxForm();
+      await loadSuggestions();
+      await loadInstallations();
+      showTab('installations');
+    } catch (e) { apiErr(e, '部位の読み込みに失敗'); }
+  }
+
+  async function loadInstallations() {
+    if (!state.currentPart) return;
+    try {
+      const { data } = await api.get(`/site-parts/${state.currentPart.id}/installations`);
+      state.installations = data || [];
+      renderInstallationsList();
+      renderIxSummary();
+    } catch (e) { apiErr(e, '取付実績の取得に失敗'); }
+  }
+
+  function renderInstallationsList() {
+    const tb = $('#ix-list'); if (!tb) return;
+    if (!state.installations.length) {
+      tb.innerHTML = '<tr><td colspan="6" class="px-2 py-4 text-center text-slate-500 text-sm">取付実績がありません</td></tr>';
+      return;
+    }
+    tb.innerHTML = state.installations.map(r => {
+      const mp = Number(r.manpower) || 0;
+      return `
+        <tr class="border-b hover:bg-slate-50">
+          <td class="px-2 py-2 whitespace-nowrap">${dayjs(r.work_date).format('YYYY/MM/DD')}</td>
+          <td class="px-2 py-2">${(r.workers || []).map(w => `<span class="chip">${esc(w)}</span>`).join(' ')}</td>
+          <td class="px-2 py-2 text-right font-semibold">${fmt(mp, mp % 1 ? 1 : 0)}</td>
+          <td class="px-2 py-2 text-right">${fmtInt(r.delivery_vehicles)}</td>
+          <td class="px-2 py-2 text-right">${fmtInt(r.commute_vehicles)}</td>
+          <td class="px-2 py-2 text-center whitespace-nowrap">
+            <button data-ix-edit="${r.id}" class="text-xs bg-slate-200 hover:bg-slate-300 px-2 py-1 rounded"><i class="fas fa-pen"></i></button>
+            <button data-ix-del="${r.id}" class="text-xs bg-red-100 hover:bg-red-200 text-red-700 px-2 py-1 rounded ml-1"><i class="fas fa-trash"></i></button>
+          </td>
+        </tr>`;
+    }).join('');
+  }
+
+  function renderIxSummary() {
+    const days = new Set(state.installations.map(r => r.work_date)).size;
+    const totalMp = state.installations.reduce((s, r) => s + (Number(r.manpower) || 0), 0);
+    const totalDv = state.installations.reduce((s, r) => s + (Number(r.delivery_vehicles) || 0), 0);
+    const totalCv = state.installations.reduce((s, r) => s + (Number(r.commute_vehicles)  || 0), 0);
+    const qty = Number(state.currentPart?.quantity) || 0;
+    const per = totalMp > 0 ? (qty / totalMp) : null;
+    $('#ix-days').textContent  = fmtInt(days);
+    $('#ix-mp').textContent    = fmt(totalMp, totalMp % 1 ? 1 : 0);
+    $('#ix-per').textContent   = per !== null ? fmt(per) : '未計算';
+    $('#ix-deliv').textContent = fmtInt(totalDv);
+    $('#ix-commu').textContent = fmtInt(totalCv);
+  }
+
+  function resetIxForm() {
+    $('#ix-f-id').value = '';
+    $('#ix-f-date').value = dayjs().format('YYYY-MM-DD');
+    $('#ix-f-mp').value = '';
+    $('#ix-f-deliv').value = '0';
+    $('#ix-f-commu').value = '0';
+    $('#ix-f-note').value = '';
+    $('#ix-f-worker-input').value = '';
+    state.ixWorkers = [];
+    renderIxWorkerChips();
+    $('#ix-form-title').textContent   = '取付実績を追加';
+    $('#ix-submit-label').textContent = '追加する';
+  }
+
+  function renderIxWorkerChips() {
+    const box = $('#ix-worker-chips'); if (!box) return;
+    box.innerHTML = state.ixWorkers.map((w, i) => `
+      <span class="chip-removable inline-flex items-center gap-1 bg-blue-100 text-blue-800 px-2 py-1 rounded-full text-xs">
+        ${esc(w)}
+        <button type="button" data-rm-worker="${i}" class="hover:text-red-600"><i class="fas fa-xmark"></i></button>
+      </span>`).join('');
+  }
+
+  function addWorkerChip() {
+    const input = $('#ix-f-worker-input');
+    const v = (input?.value || '').trim();
+    if (!v) return;
+    if (!state.ixWorkers.includes(v)) state.ixWorkers.push(v);
+    input.value = '';
+    renderIxWorkerChips();
+    input.focus();
+  }
+
+  async function submitInstallation(e) {
+    e.preventDefault();
+    if (!state.currentPart) return;
+    // フォーム入力中の人員名があれば追加
+    const pending = ($('#ix-f-worker-input')?.value || '').trim();
+    if (pending && !state.ixWorkers.includes(pending)) state.ixWorkers.push(pending);
+    $('#ix-f-worker-input').value = '';
+
+    if (!state.ixWorkers.length) { toast('人員名を1人以上追加してください', true); return; }
+
+    const id = $('#ix-f-id').value;
+    const payload = {
+      site_part_id: state.currentPart.id,
+      work_date: $('#ix-f-date').value,
+      manpower: Number($('#ix-f-mp').value) || 0,
+      delivery_vehicles: Math.max(0, Math.floor(Number($('#ix-f-deliv').value) || 0)),
+      commute_vehicles:  Math.max(0, Math.floor(Number($('#ix-f-commu').value) || 0)),
+      workers: state.ixWorkers.slice(),
+      note: $('#ix-f-note').value.trim(),
+    };
+    if (!payload.work_date) { toast('取付日を入力してください', true); return; }
+    if (!(payload.manpower > 0)) { toast('人工数を入力してください', true); return; }
+    try {
+      if (id) {
+        await api.put('/installations/' + id, payload);
+        toast('更新しました');
+      } else {
+        await api.post('/installations', payload);
+        toast('追加しました');
+      }
+      resetIxForm();
+      await loadInstallations();
+      await loadSuggestions();
+    } catch (e) { apiErr(e, '保存に失敗'); }
+  }
+
+  async function editInstallation(id) {
+    try {
+      const { data } = await api.get('/installations/' + id);
+      $('#ix-f-id').value    = data.id;
+      $('#ix-f-date').value  = data.work_date;
+      $('#ix-f-mp').value    = data.manpower;
+      $('#ix-f-deliv').value = data.delivery_vehicles ?? 0;
+      $('#ix-f-commu').value = data.commute_vehicles  ?? 0;
+      $('#ix-f-note').value  = data.note || '';
+      state.ixWorkers = (data.workers || []).slice();
+      renderIxWorkerChips();
+      $('#ix-form-title').textContent   = '取付実績を編集';
+      $('#ix-submit-label').textContent = '更新する';
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    } catch (e) { apiErr(e, '取得に失敗'); }
+  }
+
+  async function deleteInstallation(id) {
+    if (!confirm('この取付実績を削除します。よろしいですか？')) return;
+    try {
+      await api.delete('/installations/' + id);
+      toast('削除しました');
+      await loadInstallations();
+    } catch (e) { apiErr(e, '削除に失敗'); }
+  }
+
+  function exportIxCsv() {
+    if (!state.installations.length) { toast('出力対象がありません', true); return; }
+    const head = ['取付日', '人員名', '人工数', '搬入車両', '通勤車両', '備考'];
+    const rows = state.installations.map(r => [
+      r.work_date,
+      (r.workers || []).join('、'),
+      r.manpower,
+      r.delivery_vehicles ?? 0,
+      r.commute_vehicles ?? 0,
+      r.note || '',
+    ]);
+    downloadCsv(`installations_${state.currentSite?.site_name || ''}_${state.currentPart?.part || ''}.csv`, head, rows);
+  }
+
+  function downloadCsv(filename, head, rows) {
+    const csv = [head, ...rows].map(r => r.map(c => {
+      const s = String(c == null ? '' : c).replace(/"/g, '""');
+      return /[",\n]/.test(s) ? `"${s}"` : s;
+    }).join(',')).join('\r\n');
+    const bom = '\uFEFF';
+    const blob = new Blob([bom + csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click();
+    document.body.removeChild(a); URL.revokeObjectURL(url);
+  }
+
+  // ============================================================
+  // Step button (numeric +/-)
+  // ============================================================
+  function handleStepClick(btn) {
+    const target = btn.dataset.step;
+    const delta = Number(btn.dataset.delta) || 0;
+    const map = { manpower: '#ix-f-mp', deliv: '#ix-f-deliv', commu: '#ix-f-commu' };
+    const sel = map[target]; if (!sel) return;
+    const inp = $(sel); if (!inp) return;
+    const isInt = (target === 'deliv' || target === 'commu');
+    let v = Number(inp.value) || 0;
+    v += delta;
+    if (v < 0) v = 0;
+    if (isInt) v = Math.floor(v);
+    else v = Math.round(v * 10) / 10;
+    inp.value = isInt ? String(v) : String(v);
+    inp.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
+  // ============================================================
+  // ダッシュボード
+  // ============================================================
+  function getDashParams() {
+    const p = {};
+    const f = $('#dash-from')?.value; const t = $('#dash-to')?.value;
+    if (f) p.from = f; if (t) p.to = t;
+    return p;
+  }
+
+  async function loadDashboard() {
+    try {
+      const { data } = await api.get('/analytics/dashboard', { params: getDashParams() });
+      $('#kpi-total-qty').textContent = fmt(data.total.total_qty);
+      $('#kpi-total-mp').textContent  = fmt(data.total.total_mp, data.total.total_mp % 1 ? 1 : 0);
+      const per = data.total.total_mp > 0 ? data.total.total_qty / data.total.total_mp : 0;
+      $('#kpi-per-mp').textContent    = data.total.total_mp > 0 ? fmt(per) : '未計算';
+      $('#kpi-deliv').textContent     = fmtInt(data.total.total_deliv);
+      $('#kpi-commu').textContent     = fmtInt(data.total.total_commu);
+
+      drawBar('chart-site',       data.bySite.map(r => `${r.contractor || ''} / ${r.name}`), data.bySite.map(r => Number(r.qty) || 0), '現場別 登録数量(kg)');
+      drawBar('chart-part',       data.byPart.map(r => r.name), data.byPart.map(r => Number(r.qty) || 0), '部位別 登録数量(kg)');
+      drawBar('chart-worker',     data.byWorker.map(r => r.name), data.byWorker.map(r => Number(r.mp) || 0), '人員別 人工数');
+      drawBar('chart-contractor', data.byContractor.map(r => r.name), data.byContractor.map(r => Number(r.qty_share) || 0), '元請別 数量シェア(kg)');
+    } catch (e) { apiErr(e, 'ダッシュボード取得に失敗'); }
+  }
+
+  function drawBar(canvasId, labels, dataArr, title) {
+    const el = document.getElementById(canvasId); if (!el) return;
+    if (state.charts[canvasId]) state.charts[canvasId].destroy();
+    state.charts[canvasId] = new Chart(el, {
+      type: 'bar',
+      data: { labels, datasets: [{ label: title, data: dataArr, backgroundColor: 'rgba(59,130,246,0.6)', borderColor: 'rgba(59,130,246,1)', borderWidth: 1 }] },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false }, title: { display: true, text: title, font: { size: 12 } } },
+        scales: { y: { beginAtZero: true } },
+      },
+    });
+  }
+
+  // ============================================================
+  // 集計・分析
+  // ============================================================
+  function getAnParams() {
+    const p = {};
+    const f = $('#an-from')?.value; const t = $('#an-to')?.value;
+    if (f) p.from = f; if (t) p.to = t;
+    const c = $('#an-contractor')?.value;
+    const s = $('#an-site')?.value;
+    const part = $('#an-part')?.value;
+    const w = $('#an-worker')?.value;
+    if (c) p.contractor = c;
+    if (s) p.site = s;
+    if (part) p.part = part;
+    if (w) p.worker = w;
+    return p;
+  }
+
+  async function loadAnalysis() {
+    await populateAnalysisFilters();
+    await Promise.all([
+      loadAnSites(),
+      loadAnParts(),
+      loadAnDetail(),
+    ]);
+  }
+
+  async function populateAnalysisFilters() {
+    // 元請・現場名・部位は state.sites / parts / sitePartsの集約で
+    try {
+      const { data: sites } = await api.get('/sites');
+      const contractors = Array.from(new Set(sites.map(s => s.contractor))).sort();
+      const siteNames   = Array.from(new Set(sites.map(s => s.site_name))).sort();
+      const cSel = $('#an-contractor'); const sSel = $('#an-site');
+      if (cSel) {
+        const cur = cSel.value;
+        cSel.innerHTML = '<option value="">すべて</option>' + contractors.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+        cSel.value = cur;
+      }
+      if (sSel) {
+        const cur = sSel.value;
+        sSel.innerHTML = '<option value="">すべて</option>' + siteNames.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join('');
+        sSel.value = cur;
+      }
+    } catch { /* ignore */ }
+    try {
+      const { data: parts } = await api.get('/parts');
+      const pSel = $('#an-part');
+      if (pSel) {
+        const cur = pSel.value;
+        pSel.innerHTML = '<option value="">すべて</option>' + parts.map(p => `<option value="${esc(p.name)}">${esc(p.name)}</option>`).join('');
+        pSel.value = cur;
+      }
+    } catch { /* ignore */ }
+    await loadSuggestions();
+  }
+
+  async function loadAnSites() {
+    try {
+      const { data } = await api.get('/analytics/sites', { params: getAnParams() });
+      const tb = $('#an-site-summary');
+      if (!data.length) {
+        tb.innerHTML = '<tr><td colspan="8" class="px-2 py-3 text-center text-slate-500 text-sm">該当データがありません</td></tr>';
+        return;
+      }
+      tb.innerHTML = data.map(r => {
+        const qty = Number(r.total_qty) || 0;
+        const mp  = Number(r.total_mp)  || 0;
+        const per = mp > 0 ? (qty / mp) : null;
+        return `
+          <tr class="border-b hover:bg-slate-50">
+            <td class="px-2 py-2">${esc(r.contractor)}</td>
+            <td class="px-2 py-2">${esc(r.site_name)}</td>
+            <td class="px-2 py-2 text-right font-semibold">${fmt(qty)}</td>
+            <td class="px-2 py-2 text-right">${fmtInt(r.work_days)}</td>
+            <td class="px-2 py-2 text-right">${fmt(mp, mp % 1 ? 1 : 0)}</td>
+            <td class="px-2 py-2 text-right ${per === null ? 'text-slate-400' : 'text-orange-600 font-semibold'}">${per !== null ? fmt(per) : '未計算'}</td>
+            <td class="px-2 py-2 text-right">${fmtInt(r.total_deliv)}</td>
+            <td class="px-2 py-2 text-right">${fmtInt(r.total_commu)}</td>
+          </tr>`;
+      }).join('');
+    } catch (e) { apiErr(e, '現場サマリの取得に失敗'); }
+  }
+
+  async function loadAnParts() {
+    try {
+      const { data } = await api.get('/analytics/parts', { params: getAnParams() });
+      const tb = $('#an-part-summary');
+      if (!data.length) {
+        tb.innerHTML = '<tr><td colspan="9" class="px-2 py-3 text-center text-slate-500 text-sm">該当データがありません</td></tr>';
+        return;
+      }
+      tb.innerHTML = data.map(r => {
+        const qty = Number(r.registered_qty) || 0;
+        const mp  = Number(r.total_mp) || 0;
+        const per = mp > 0 ? (qty / mp) : null;
+        return `
+          <tr class="border-b hover:bg-slate-50">
+            <td class="px-2 py-2">${esc(r.contractor)}</td>
+            <td class="px-2 py-2">${esc(r.site_name)}</td>
+            <td class="px-2 py-2 font-semibold">${esc(r.part)}</td>
+            <td class="px-2 py-2 text-right">${fmt(qty)}</td>
+            <td class="px-2 py-2 text-right">${fmtInt(r.work_days)}</td>
+            <td class="px-2 py-2 text-right">${fmt(mp, mp % 1 ? 1 : 0)}</td>
+            <td class="px-2 py-2 text-right ${per === null ? 'text-slate-400' : 'text-orange-600 font-semibold'}">${per !== null ? fmt(per) : '未計算'}</td>
+            <td class="px-2 py-2 text-right">${fmtInt(r.total_deliv)}</td>
+            <td class="px-2 py-2 text-right">${fmtInt(r.total_commu)}</td>
+          </tr>`;
+      }).join('');
+    } catch (e) { apiErr(e, '部位サマリの取得に失敗'); }
+  }
+
+  async function loadAnDetail() {
+    try {
+      const { data } = await api.get('/installations', { params: getAnParams() });
+      const tb = $('#an-detail');
+      if (!data.length) {
+        tb.innerHTML = '<tr><td colspan="8" class="px-2 py-3 text-center text-slate-500 text-sm">該当データがありません</td></tr>';
+        return;
+      }
+      tb.innerHTML = data.map(r => {
+        const mp = Number(r.manpower) || 0;
+        return `
+          <tr class="border-b hover:bg-slate-50">
+            <td class="px-2 py-2 whitespace-nowrap">${dayjs(r.work_date).format('YYYY/MM/DD')}</td>
+            <td class="px-2 py-2">${esc(r.contractor)}</td>
+            <td class="px-2 py-2">${esc(r.site_name)}</td>
+            <td class="px-2 py-2">${esc(r.part)}</td>
+            <td class="px-2 py-2">${(r.workers || []).map(w => `<span class="chip">${esc(w)}</span>`).join(' ')}</td>
+            <td class="px-2 py-2 text-right font-semibold">${fmt(mp, mp % 1 ? 1 : 0)}</td>
+            <td class="px-2 py-2 text-right">${fmtInt(r.delivery_vehicles)}</td>
+            <td class="px-2 py-2 text-right">${fmtInt(r.commute_vehicles)}</td>
+          </tr>`;
+      }).join('');
+    } catch (e) { apiErr(e, '取付実績一覧の取得に失敗'); }
+  }
+
+  function exportAnCsv() {
+    api.get('/installations', { params: getAnParams() }).then(({ data }) => {
+      if (!data.length) { toast('出力対象がありません', true); return; }
+      const head = ['取付日', '元請', '現場名', '部位', '人員名', '人工数', '搬入車両', '通勤車両', '備考'];
+      const rows = data.map(r => [
+        r.work_date, r.contractor, r.site_name, r.part,
+        (r.workers || []).join('、'),
+        r.manpower, r.delivery_vehicles ?? 0, r.commute_vehicles ?? 0, r.note || '',
+      ]);
+      downloadCsv('analysis_export.csv', head, rows);
+    }).catch(e => apiErr(e, 'CSV出力に失敗'));
+  }
+
+  // ============================================================
+  // イベント登録
+  // ============================================================
+  function bindEvents() {
+    // 上部タブ
+    $$('.tab-btn').forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
+    // 戻るボタン
+    document.addEventListener('click', (e) => {
+      const back = e.target.closest('.back-btn'); if (!back) return;
+      const to = back.dataset.back;
+      if (to === 'sites') showTab('sites');
+      else if (to === 'site-parts') showTab('site-parts');
+    });
+    // パンくず
+    document.addEventListener('click', (e) => {
+      const a = e.target.closest('[data-bc]'); if (!a) return;
+      e.preventDefault();
+      const to = a.dataset.bc;
+      if (to === 'sites') showTab('sites');
+      else if (to === 'site-parts') showTab('site-parts');
+    });
+
+    // 現場一覧
+    $('#sites-new')?.addEventListener('click', () => openSiteModal(null));
+    $('#new-site-btn')?.addEventListener('click', () => openSiteModal(null));
+    $('#sites-search')?.addEventListener('input', () => {
+      clearTimeout(window._st); window._st = setTimeout(loadSites, 300);
+    });
+    document.addEventListener('click', (e) => {
+      const open = e.target.closest('[data-site-open]');
+      const ed   = e.target.closest('[data-site-edit]');
+      const dl   = e.target.closest('[data-site-del]');
+      if (open) openSitePartsScreen(open.dataset.siteOpen);
+      else if (ed) editSite(ed.dataset.siteEdit);
+      else if (dl) deleteSite(dl.dataset.siteDel);
+    });
+
+    // 現場モーダル
+    $('#site-modal-close')?.addEventListener('click', closeSiteModal);
+    $('#site-modal-cancel')?.addEventListener('click', closeSiteModal);
+    $('#site-form')?.addEventListener('submit', submitSite);
+
+    // 部位・数量
+    $('#sp-form')?.addEventListener('submit', submitSitePart);
+    $('#sp-reset')?.addEventListener('click', resetSpForm);
+    $('#sp-edit-site')?.addEventListener('click', () => {
+      if (state.currentSite) editSite(state.currentSite.id);
+    });
+    document.addEventListener('click', (e) => {
+      const open = e.target.closest('[data-sp-open]');
+      const ed   = e.target.closest('[data-sp-edit]');
+      const dl   = e.target.closest('[data-sp-del]');
+      if (open) openInstallationsScreen(open.dataset.spOpen);
+      else if (ed) editSitePart(ed.dataset.spEdit);
+      else if (dl) deleteSitePart(dl.dataset.spDel);
+    });
+
+    // 取付実績
+    $('#ix-form')?.addEventListener('submit', submitInstallation);
+    $('#ix-reset')?.addEventListener('click', resetIxForm);
+    $('#ix-add-worker')?.addEventListener('click', addWorkerChip);
+    $('#ix-f-worker-input')?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); addWorkerChip(); }
+    });
+    $('#ix-export')?.addEventListener('click', exportIxCsv);
+    document.addEventListener('click', (e) => {
+      const ed = e.target.closest('[data-ix-edit]');
+      const dl = e.target.closest('[data-ix-del]');
+      const rm = e.target.closest('[data-rm-worker]');
+      if (ed) editInstallation(ed.dataset.ixEdit);
+      else if (dl) deleteInstallation(dl.dataset.ixDel);
+      else if (rm) {
+        const i = Number(rm.dataset.rmWorker);
+        state.ixWorkers.splice(i, 1);
+        renderIxWorkerChips();
+      }
+    });
+    // ステップボタン
+    document.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-step]'); if (!b) return;
+      handleStepClick(b);
+    });
+
+    // ダッシュボード
+    $('#dash-apply')?.addEventListener('click', loadDashboard);
+    $('#dash-clear')?.addEventListener('click', () => {
+      $('#dash-from').value = ''; $('#dash-to').value = ''; loadDashboard();
+    });
+
+    // 分析
+    $('#an-apply')?.addEventListener('click', loadAnalysis);
+    $('#an-clear')?.addEventListener('click', () => {
+      ['#an-from', '#an-to', '#an-contractor', '#an-site', '#an-part', '#an-worker'].forEach(s => { const el = $(s); if (el) el.value = ''; });
+      loadAnalysis();
+    });
+    $('#an-export')?.addEventListener('click', exportAnCsv);
+
+    // 部位マスタ
+    $('#part-add')?.addEventListener('click', addPart);
+    $('#part-input')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); addPart(); } });
+    document.addEventListener('click', (e) => {
+      const ed = e.target.closest('[data-part-edit]');
+      const dl = e.target.closest('[data-part-del]');
+      if (ed) editPart(ed.dataset.partEdit, ed.dataset.name);
+      else if (dl) deletePart(dl.dataset.partDel);
+    });
+  }
+
+  // ============================================================
+  // 起動
+  // ============================================================
+  async function init() {
+    bindEvents();
+    await loadParts(false);
+    await loadSuggestions();
+    showTab('sites');
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
 })();
