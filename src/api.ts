@@ -1015,6 +1015,8 @@ interface CommitBlock {
   manpower: number
   workers: string[]
   vehicle_note: string
+  delivery_vehicles?: number
+  commute_vehicles?: number
   work_date: string
   qty_strategy?: 'keep' | 'overwrite' | 'add'   // 既存部位の数量との衝突時
 }
@@ -1108,6 +1110,8 @@ api.post('/import/commit', async (c) => {
       // 3. 取付実績 (installations) の登録
       const mp = Number(b.manpower) || 0
       const vn = (b.vehicle_note || '').toString().trim()
+      const dv = Math.max(0, Math.floor(Number(b.delivery_vehicles) || 0))
+      const cv = Math.max(0, Math.floor(Number(b.commute_vehicles) || 0))
       const ins = await c.env.DB.prepare(`
         INSERT INTO installations
           (site_part_id, site_id, work_date, contractor, site_name, part,
@@ -1115,7 +1119,7 @@ api.post('/import/commit', async (c) => {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).bind(
         site_part_id, site_id, b.work_date, contractor, site_name, part,
-        0, mp, 0, 0, vn, ''
+        0, mp, dv, cv, vn, ''
       ).run()
       const installation_id = ins.meta.last_row_id as number
 

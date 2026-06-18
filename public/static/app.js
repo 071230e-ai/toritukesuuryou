@@ -898,6 +898,8 @@
         manpower: Number(b.manpower || 0),
         workers_text: (b.workers || []).join('、'),
         vehicle_note: b.vehicle_note || '',
+        delivery_vehicles: Number(b.delivery_vehicles || 0),
+        commute_vehicles: Number(b.commute_vehicles || 0),
         work_date: b.work_date || formDate || todayStr(),
         warnings: b.warnings || [],
         qty_strategy: 'overwrite', // 既存数量と異なる時のデフォルト
@@ -1024,6 +1026,14 @@
               <label class="block text-[11px] text-slate-500 mb-0.5">人員名 (、または , 区切り。×2 は2人工として加算)</label>
               <input type="text" data-im-field="workers_text" data-im-i="${i}" value="${esc(b.workers_text)}" class="w-full border rounded px-2 py-1.5 text-sm" placeholder="例: 中村隆、中村清、小泉組×4" />
             </div>
+            <div>
+              <label class="block text-[11px] text-slate-500 mb-0.5">搬入車両 (台)</label>
+              <input type="number" min="0" step="1" inputmode="numeric" data-im-field="delivery_vehicles" data-im-i="${i}" value="${b.delivery_vehicles || 0}" class="w-full border rounded px-2 py-1.5 text-sm text-right" />
+            </div>
+            <div>
+              <label class="block text-[11px] text-slate-500 mb-0.5">通勤車両 (台)</label>
+              <input type="number" min="0" step="1" inputmode="numeric" data-im-field="commute_vehicles" data-im-i="${i}" value="${b.commute_vehicles || 0}" class="w-full border rounded px-2 py-1.5 text-sm text-right" />
+            </div>
             <div class="sm:col-span-2">
               <label class="block text-[11px] text-slate-500 mb-0.5">運搬車両メモ</label>
               <input type="text" data-im-field="vehicle_note" data-im-i="${i}" value="${esc(b.vehicle_note)}" class="w-full border rounded px-2 py-1.5 text-sm" placeholder="例: 4トン運搬" />
@@ -1044,6 +1054,7 @@
     if (!state.importBlocks[i]) return;
     let v = el.value;
     if (field === 'quantity' || field === 'manpower') v = Number(v) || 0;
+    if (field === 'delivery_vehicles' || field === 'commute_vehicles') v = Math.max(0, Math.floor(Number(v) || 0));
     state.importBlocks[i][field] = v;
     // 内容を変更した瞬間、失敗状態 ('ng') を解除して再登録可能にする
     if (state.importBlocks[i].commit_status === 'ng') {
@@ -1171,6 +1182,8 @@
       workers: (b.workers_text || '')
         .split(/[、,，\s]+/).map(s => s.trim()).filter(Boolean),
       vehicle_note: (b.vehicle_note || '').trim(),
+      delivery_vehicles: Math.max(0, Math.floor(Number(b.delivery_vehicles) || 0)),
+      commute_vehicles:  Math.max(0, Math.floor(Number(b.commute_vehicles)  || 0)),
       work_date: b.work_date,
       qty_strategy: b.qty_strategy || 'overwrite',
     }));
