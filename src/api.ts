@@ -615,9 +615,61 @@ interface ParsedBlock {
 function cleanSegment(s: string): string {
   return s
     .replace(/[‼❗]+/g, '')          // ‼️ 強調記号
-    .replace(/[️]/g, '')              // 異体字セレクタ
+    .replace(/[\uFE0F]/g, '')         // 異体字セレクタ (VS16)
     .replace(/[!！。]+$/g, '')        // 末尾の記号
     .trim()
+}
+
+// ‼️ または ! を区切りとして扱う統一区切り正規表現
+// ‼️ は U+203C + U+FE0F、または U+2757 (❗) なども想定
+const SEP_RE = /[‼❗]+\uFE0F?|[!！]+/u
+
+// 「(見積り書有り)」「(見積り書無し)」「(仮称)」等の現場名に余分な接頭/接尾括弧を除去
+function stripQuoteParen(s: string): string {
+  return s
+    // 見積り書(有り/無し/有/無) — 「有り」「無し」を最後まで吸収
+    .replace(/[（(]\s*見積\s*り?\s*書\s*(?:有\s*り?|無\s*し?)\s*[)）]/g, '')
+    // (仮称) (仮) を除去
+    .replace(/[（(]\s*仮称?\s*[)）]/g, '')
+    .trim()
+}
+
+// ‼️ 区切りで現場名候補に挟まれる「ノイズセグメント」を判定
+// 例: 「終了予定」「終わり次第」「朝礼○時」など
+function isNoiseBetweenHeaderAndSite(seg: string): boolean {
+  const s = seg.replace(/\s+/g, '')
+  if (!s) return true
+  if (/^(終了予定|終わり次第)$/.test(s)) return true
+  if (/^朝礼/.test(s)) return true
+  if (/^配筋検査/.test(s)) return true
+  if (/^\d{1,2}\s*時/.test(s)) return true
+  return false
+}
+
+// 部位として妥当でないセグメントを判定
+// - 住所 / 時間 / 朝礼・配筋検査 / 車両名 / 人員行 / メモ系
+function isNonPartSegment(seg: string): boolean {
+  const s = seg.replace(/\s+/g, '')
+  if (!s) return true
+  // 人員行 ( = / 応援= から始まる )
+  if (/^[応援]*\s*[=＝]/.test(s)) return true
+  if (/[=＝]/.test(s)) return true
+  // 時間 / 朝礼 / 配筋検査
+  if (/^\d{1,2}\s*時/.test(s)) return true
+  if (/朝礼|配筋検査|終了予定|終わり次第|高速代車|駐車場代|請求/.test(s)) return true
+  // 車両名 / 車両メモ
+  if (/^\d+\s*[トt][ンン](?:運搬|ダンプ|車)/.test(s)) return true
+  if (/エブリ|プロボックス|ハイエース/.test(s)) return true
+  if (/旧.*車?$/.test(s) && s.length < 8) return true
+  // 数量・人工数・日数の単独
+  if (/^約?[\d,]+[KkＫ]$/.test(s)) return true
+  if (/^[\d]+人目$/.test(s)) return true
+  if (/^[\d]+日目$/.test(s)) return true
+  // 住所判定 (強パターン)
+  if (/(?:[都道府県市区郡]\S{0,15}(?:町|村|丁目|番地|付近)|\d+丁目|\d+番地|\d+号地|号地|付近$|擁壁$|京都\S*区|大阪\S*区|阿倍野|伏見|下京|上京|中京|右京|左京|西京|北区|南区|東山|山科|亀岡|茨木|岩田鉄筋取り付け)/.test(s)) return true
+  // メモ的記述 (「○○君エブリ」「山﨑君エブリ、和志君エブリ」など)
+  if (/君エブリ/.test(s)) return true
+  return false
 }
 
 // 「6/18日の予定」「2026/6/18」「6月18日」を YYYY-MM-DD に変換
@@ -655,19 +707,36 @@ function extractWorkDate(text: string, fallback: string): string {
 }
 
 // 1ブロック (空行区切り) のパース
+//
+// 想定する1行目の構造:
+//   元請、○日目、数量K、○人目‼️現場名(見積り書有り/無し)‼️部位‼️住所やメモ‼️…
+//
+// 解析ルール:
+//   - 「=」または「応援=」で始まる行は **人員名のみ** として扱い、現場名・部位候補から完全に除外
+//   - 1行目を ‼️ で分割し、「○人目」を含むセグメントの直後を現場名、次を部位、それ以降を住所/メモとして読み飛ばす
+//   - 数量・人工数・運搬車両は行を問わずブロック全体から正規表現で抽出
+//   - 日付はブロック内からは抽出しない（住所の "1-12-1/3号地" 等の誤検知防止）。呼び出し側で fallbackDate を渡す。
 function parseBlock(rawBlock: string, fallbackDate: string): ParsedBlock | null {
   const warnings: string[] = []
-  const lines = rawBlock.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
-  if (!lines.length) return null
+  const allLines = rawBlock.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
+  if (!allLines.length) return null
 
-  // 行を結合して ‼️ / , / 、 で分割（,/、はセグメント内の小区切り）
-  const flat = lines.join('‼️')
-  // ‼️ または改行ベース、また 、 ','で分割するが、これは項目間の区切りに使うことが多い
-  // まず ‼️ で大きく分け、その後 、 や ',' は元請ヘッダ部の小区切りに使う
-  const bigSegs = flat.split(/[‼❗]+️?/u).map(cleanSegment).filter(Boolean)
-  if (!bigSegs.length) return null
+  // === 行を「人員名行 (=/応援=で始まる)」と「それ以外」に分離 ===
+  // workers 行は現場名・部位の解析対象に絶対に入れない
+  const workerLines: string[] = []
+  const otherLines: string[] = []
+  for (const ln of allLines) {
+    // ‼️ や 異体字セレクタ を一旦除去した先頭文字で判定
+    const head = ln.replace(/^[\s‼❗\uFE0F!！]+/, '')
+    if (/^(?:応援\s*)?[=＝]/.test(head)) {
+      workerLines.push(ln)
+    } else {
+      otherLines.push(ln)
+    }
+  }
+  if (!otherLines.length) return null
 
-  // === 数量 / 人工数 をブロック全体から拾う ===
+  // === 数量 / 人工数 / 運搬車両 はブロック全体から抽出 ===
   let quantity = 0
   let manpower = 0
   const qm = rawBlock.match(/約?\s*([\d,]+)\s*[KkＫ]/)
@@ -677,120 +746,128 @@ function parseBlock(rawBlock: string, fallbackDate: string): ParsedBlock | null 
   if (!quantity) warnings.push('数量を読み取れませんでした')
   if (!manpower) warnings.push('人工数を読み取れませんでした')
 
-  // === 運搬車両 ===
   const vm = rawBlock.match(/(\d+\s*[トt]\s*[ンン]\s*(?:運搬|ダンプ|車))/)
   const vehicle_note = vm ? cleanSegment(vm[1]).replace(/\s+/g, '') : ''
-  // 単独で「2トンダンプ」「3トン運搬」など segs 内の独立要素として現れている場合もカバー (上のregexで概ねOK)
 
-  // === 人員名: "=" または "応援=" 以降を抽出 ===
+  // === 人員名: workerLines から抽出。「= の後ろ」または「応援= の後ろ」を、、, で分割 ===
+  // otherLines にも「=」を含む行が混入することがあるが、その場合も = 以降のみ拾う(安全策)
   let workers: string[] = []
-  // ブロック全体から =... を取り出す（複数行対応）
-  const eqMatches = rawBlock.match(/(?:応援\s*)?=([^\n=]+)/g) || []
-  for (const em of eqMatches) {
-    const body = em.replace(/^.*?=/, '').trim()
-    // ‼️、、, で分割し、空 / 記号のみを除外
-    const ws = body
-      .split(/[‼❗、,，]+️?/u)
-      .map(cleanSegment)
-      .map(w => w.replace(/[‼️!！]+/g, '').trim())
-      .filter(w => w && !/^\(.*\)$/.test(w))
-    workers.push(...ws)
+  const eqRe = /(?:応援\s*)?[=＝]([^=＝\n]+)/g
+  for (const ln of workerLines) {
+    let m: RegExpExecArray | null
+    eqRe.lastIndex = 0
+    while ((m = eqRe.exec(ln)) !== null) {
+      const ws = m[1]
+        .split(/[‼❗、,，]+\uFE0F?/u)
+        .map(cleanSegment)
+        .map(w => w.replace(/[‼❗!！\uFE0F]+/g, '').trim())
+        .filter(w => w && !/^\(.*\)$/.test(w))
+      workers.push(...ws)
+    }
   }
-  // 重複除去
   workers = Array.from(new Set(workers))
   if (!workers.length) warnings.push('人員名を読み取れませんでした')
 
-  // === 元請 / 現場名 / 部位 を big segs から拾う ===
-  // 最初の segment は「アムザ工務店、3日目、9960K、16人目」のような複合行になっている可能性がある
-  // → 、/, で分割した先頭が「元請」
+  // === 元請 / 現場名 / 部位 を otherLines の1行目から位置ベースで抽出 ===
   let contractor = ''
   let site_name = ''
   let part = ''
 
-  // 最初の big seg のさらに小分割（、, で）
-  const headParts = bigSegs[0].split(/[、,，]/).map(s => cleanSegment(s)).filter(Boolean)
-  if (headParts.length) contractor = headParts[0]
+  // 1行目 (worker 以外の最初の行) を ‼️ で分割
+  const firstLine = otherLines[0]
+  const firstSegs = firstLine.split(SEP_RE).map(cleanSegment).filter(Boolean)
 
-  // 除外キーワード（住所/メモ系）
-  const excludeKw = /^(?:[\d]+日目|約?[\d,]+[KkＫ]|[\d]+人目|終了予定|終わり次第|第\s*[一二三]\s*工場|.*時着|.*時～|.*時〜|.*~|.*～|.*〜|.*朝礼|.*配筋検査|.*検査|.*エブリ$|.*エブリ\b|プロボックス|ハイエース|高速代車|駐車場代.*|.*請求.*|岩田鉄筋取り付け|旧.*|.*車$|終了)/u
-  // 住所判定: より強い住所パターン（市・区・丁目・番地・号地・付近、または番地数字を含む）
-  const addressKw = /(?:[都道府県市区郡]\S{0,15}(?:町|村|丁目|番地|付近)|\d+丁目|\d+番地|\d+号地|号地|付近$|擁壁$|[A-Za-z\d]+-\d+(?:-\d+)?|京都\S*区|大阪\S*区|阿倍野|伏見|下京|上京|中京|右京|左京|西京|北区|南区|東山|山科|亀岡|茨木)/
-  // 部位キーワード (優先採用)
-  const partKw = /(?:基礎|柱|梁|壁|スラブ|土間|枕梁|止水壁|擁壁|機械基礎|^[\d０-９]+F|地中梁|杭|フーチング)/u
-
-  // 残りの segs（先頭は元請複合行なので除く）
-  const restSegs = [...headParts.slice(1), ...bigSegs.slice(1)]
-
-  // 部位らしいセグメントを先に拾う候補 / 現場名候補
-  const candidates: string[] = []
-  // 住所判定で弾かれたものをフォールバック用に保持（全て弾かれた場合に現場名として救済）
-  const addressLike: string[] = []
-
-  for (const s of restSegs) {
-    const seg = s.replace(/\s+/g, '')
-    if (!seg) continue
-    // "=" で始まる人員リスト行は除外（人員は別途処理済み）
-    if (/^[応援]*\s*[=＝]/.test(seg)) continue
-    if (/[=＝]/.test(seg)) continue
-    if (excludeKw.test(seg)) continue
-    // 数量・人工数・日数のセグメント単体
-    if (/^約?[\d,]+[KkＫ]$/.test(seg)) continue
-    if (/^[\d]+人目$/.test(seg)) continue
-    if (/^[\d]+日目$/.test(seg)) continue
-    // 運搬車両セグメントは vehicle_note に拾い済み
-    if (/^\d+\s*[トt][ンン](?:運搬|ダンプ|車)/.test(seg)) continue
-    // "○○君エブリ" のような車両メモ
-    if (/エブリ|プロボックス|ハイエース/.test(seg) && seg.length < 20) continue
-    if (/^(?:8|9|10|11|12|13|14|15|16|17)時/.test(seg)) continue
-
-    // 括弧除去（見積り書有り/無し 等）
-    const cleaned = seg.replace(/[（(][^）)]*[)）]/g, '').trim()
-    if (!cleaned) continue
-
-    // 住所判定
-    if (addressKw.test(cleaned)) {
-      addressLike.push(cleaned)
-      continue
-    }
-
-    candidates.push(cleaned)
-  }
-
-  // すべて住所判定で弾かれて site_name候補が無い場合、最初の addressLike を現場名として救済
-  // (例: 「北春日丘1-12-1/3号地擁壁」のような住所形式の現場名)
-  if (candidates.length === 0 && addressLike.length > 0) {
-    candidates.push(addressLike[0])
-  }
-
-  // candidates から、部位っぽいものは part 候補、それ以外は site_name 候補
-  // 通常の予定表は「現場名 → 部位 → 住所 …」の順なので、最初の非住所セグメントが現場名
-  // 2番目以降に部位キーワードが現れるものを part として採用
-  for (const c of candidates) {
-    if (!site_name) {
-      site_name = c
-      continue
-    }
-    if (!part) {
-      part = c
-      continue
-    }
-    // それ以降: 部位キーワードを含み、まだ part が部位パターンに合致してなければ上書き
-    if (partKw.test(c) && !partKw.test(part)) {
-      part = c
+  // [0] には「元請、○日目、数量K、○人目」の複合が入っている想定
+  // 「○人目」を含む位置を見つけ、その次のセグメントが現場名、さらに次が部位
+  let headerIdx = -1
+  for (let i = 0; i < firstSegs.length; i++) {
+    if (/人\s*目/.test(firstSegs[i])) {
+      headerIdx = i
+      break
     }
   }
 
-  // 安全策: site_name が部位っぽくて、かつ part が空 → 入れ替え
-  if (site_name && !part && partKw.test(site_name) && site_name.length <= 12) {
-    part = site_name
-    site_name = ''
+  // 元請: 先頭セグメントを「、」「,」で分割した最初の項目
+  // ただし headerIdx > 0 の場合は ‼️ より前にすでに分割されているケースもある → firstSegs[0] が「元請」だけのこともある
+  const headerSeg = firstSegs[0] || ''
+  const headerParts = headerSeg.split(/[、,，]/).map(s => cleanSegment(s)).filter(Boolean)
+  if (headerParts.length) contractor = headerParts[0]
+
+  // 現場名 = headerIdx 直後のセグメント (ノイズはスキップ)
+  // 部位 = その次のセグメント
+  if (headerIdx >= 0) {
+    // ノイズ (終了予定/終わり次第/朝礼/時刻 等) はスキップして次の有効なセグメントを現場名とする
+    let siteIdx = headerIdx + 1
+    while (siteIdx < firstSegs.length && isNoiseBetweenHeaderAndSite(firstSegs[siteIdx])) {
+      siteIdx++
+    }
+    const siteRaw = firstSegs[siteIdx]
+    const partRaw = firstSegs[siteIdx + 1]
+    if (siteRaw) {
+      const c = stripQuoteParen(siteRaw).trim()
+      if (c) site_name = c
+    }
+    if (partRaw) {
+      const c = stripQuoteParen(partRaw).trim()
+      // 部位行に住所・時間・メモが来た場合は採用しない
+      if (c && !isNonPartSegment(c)) part = c
+    }
+  } else {
+    // 「○人目」が1行目に無い場合の救済処理
+    // パターンA: ‼️で分割した先頭 firstSegs[0] 内に「、元請、数量K、現場名(...)」と
+    //            すべてが詰まっているケース (MIC, aIife木造)
+    //            → firstSegs[0] を 、 で分割し、K を含む項目より後を現場名候補とする
+    // パターンB: firstSegs[i] (i>0) に K が単独で入っているケース
+    //            → firstSegs[qIdx + 1] を現場名候補とする (従来動作)
+
+    // パターンA: 先頭セグメント内の「、」分割
+    const head0 = firstSegs[0] || ''
+    const head0Parts = head0.split(/[、,，]/).map(s => cleanSegment(s)).filter(Boolean)
+    let kPartIdx = -1
+    for (let i = 0; i < head0Parts.length; i++) {
+      if (/^約?\s*[\d,]+\s*[KkＫ]\s*$/.test(head0Parts[i])) { kPartIdx = i; break }
+    }
+    if (kPartIdx >= 0 && kPartIdx + 1 < head0Parts.length) {
+      // K の後ろ (、で続いている) を現場名として採用
+      // 例: 「MIC、368K、国道423号(法貴バイパス)防災・安全交付金工事(見積り書有り)」
+      //      → head0Parts = ["MIC","368K","国道423号(法貴バイパス)防災・安全交付金工事(見積り書有り)"]
+      //      → 現場名 = head0Parts[2]
+      const siteRaw = head0Parts.slice(kPartIdx + 1).join('、')
+      const c = stripQuoteParen(siteRaw).trim()
+      if (c) site_name = c
+      // 部位は firstSegs[1] (次の ‼️ 区切り) から取得
+      const partRaw = firstSegs[1]
+      if (partRaw) {
+        const pc = stripQuoteParen(partRaw).trim()
+        if (pc && !isNonPartSegment(pc)) part = pc
+      }
+    } else {
+      // パターンB: ‼️ で区切られた個別セグメントに K が単独で入っているケース
+      let qIdx = -1
+      for (let i = 0; i < firstSegs.length; i++) {
+        if (/[KkＫ]/.test(firstSegs[i])) { qIdx = i; break }
+      }
+      if (qIdx >= 0) {
+        const siteRaw = firstSegs[qIdx + 1]
+        const partRaw = firstSegs[qIdx + 2]
+        if (siteRaw) {
+          const c = stripQuoteParen(siteRaw).trim()
+          if (c) site_name = c
+        }
+        if (partRaw) {
+          const c = stripQuoteParen(partRaw).trim()
+          if (c && !isNonPartSegment(c)) part = c
+        }
+      }
+    }
   }
+
+  // 住所形式の現場名 (例: 「中京区壬生天池町35-20・35-21④」) を受け入れる
+  // 既に site_name が拾えていれば住所判定で再度弾かない（位置ベース優先）
 
   if (!contractor) warnings.push('元請を読み取れませんでした')
   if (!site_name)  warnings.push('現場名を読み取れませんでした')
   if (!part)       warnings.push('部位を読み取れませんでした')
-
-  const work_date = extractWorkDate(rawBlock, fallbackDate)
 
   return {
     contractor,
@@ -800,7 +877,7 @@ function parseBlock(rawBlock: string, fallbackDate: string): ParsedBlock | null 
     manpower,
     workers,
     vehicle_note,
-    work_date,
+    work_date: fallbackDate,
     raw: rawBlock.trim(),
     warnings,
   }
@@ -828,11 +905,31 @@ api.post('/import/parse', async (c) => {
   }
   if (buf.length) blocks.push(buf.join('\n'))
 
-  // 全体先頭付近からの日付推定（"6/18日の予定です。"行など）
-  const headerSlice = lines.slice(0, 5).join(' ')
-  const headerDate = extractWorkDate(headerSlice, '')
+  // 全体テキストの先頭ヘッダ（最初の空行までの行のみ）から日付を抽出
+  // これにより、ブロック内の住所「1-12-1/3号地」のような数字が日付として誤抽出されないようにする
+  const headerLines: string[] = []
+  for (const ln of lines) {
+    if (ln.trim() === '') {
+      if (headerLines.length) break
+      continue
+    }
+    headerLines.push(ln)
+    if (headerLines.length >= 5) break
+  }
+  // ヘッダ行が「6/18日の予定です」等の短い予定記述だけの場合に絞って日付抽出する
+  // (1ブロック目から始まる場合はヘッダ無しなのでスキップ)
+  let headerDate = ''
+  const headerJoined = headerLines.join(' ')
+  // 「予定」を含む短いヘッダのみから抽出 (=数量Kや人工目を含む現場行は対象外)
+  if (/予定/.test(headerJoined) && !/[KkＫ]/.test(headerJoined) && !/人\s*目/.test(headerJoined)) {
+    headerDate = extractWorkDate(headerJoined, '')
+  }
 
-  // フォームの work_date が最優先、無ければ headerDate、それも無ければ各ブロック内部の日付、それも無ければ今日
+  // 取付日の優先順位:
+  //   ① フォームの work_date (画面の取付日入力欄)
+  //   ② テキスト先頭のヘッダ行 ("6/18日の予定です") から抽出
+  //   ③ 今日の日付
+  // ブロック内のテキストからは日付を抽出しない (住所の "1/3" 等の誤検知防止)
   const today = new Date().toISOString().slice(0, 10)
   const baseDate = (work_date && work_date.trim()) || headerDate || today
 
