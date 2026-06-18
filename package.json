@@ -3,19 +3,19 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "dev:sandbox": "wrangler pages dev dist --d1=webapp-production --local --ip 0.0.0.0 --port 3000",
+    "dev:sandbox": "wrangler pages dev dist --d1=webapp-rebar-installations --local --ip 0.0.0.0 --port 3000",
     "build": "vite build",
     "preview": "wrangler pages dev dist",
     "deploy": "npm run build && wrangler pages deploy dist",
     "deploy:prod": "npm run build && wrangler pages deploy dist --project-name webapp",
     "cf-typegen": "wrangler types --env-interface CloudflareBindings",
     "clean-port": "fuser -k 3000/tcp 2>/dev/null || true",
-    "db:migrate:local": "wrangler d1 migrations apply webapp-production --local",
-    "db:migrate:prod": "wrangler d1 migrations apply webapp-production",
-    "db:seed": "wrangler d1 execute webapp-production --local --file=./seed.sql",
+    "db:migrate:local": "wrangler d1 migrations apply webapp-rebar-installations --local",
+    "db:migrate:prod": "wrangler d1 migrations apply webapp-rebar-installations",
+    "db:seed": "wrangler d1 execute webapp-rebar-installations --local --file=./seed.sql",
     "db:reset": "rm -rf .wrangler/state/v3/d1 && npm run db:migrate:local && npm run db:seed",
-    "db:console:local": "wrangler d1 execute webapp-production --local",
-    "db:console:prod": "wrangler d1 execute webapp-production"
+    "db:console:local": "wrangler d1 execute webapp-rebar-installations --local",
+    "db:console:prod": "wrangler d1 execute webapp-rebar-installations"
   },
   "dependencies": {
     "hono": "^4.12.25"
