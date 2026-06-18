@@ -650,6 +650,30 @@ function cleanSegment(s: string): string {
 // ‼️ は U+203C + U+FE0F、または U+2757 (❗) なども想定
 const SEP_RE = /[‼❗]+\uFE0F?|[!！]+/u
 
+// 人員名から人工数を計算する共通関数
+// ルール:
+//   - 「×N」「xN」「XN」「×N」(全角×・半角x・半角X 全部対応) があればその N を人工数として加算
+//   - 倍数記号がなければ 1人工として加算
+//   - 半角・全角の数字に対応
+// 例: ["中村隆", "中村清", "小泉組×4"] → 1 + 1 + 4 = 6
+export function calcManpowerFromWorkers(workers: string[]): number {
+  if (!Array.isArray(workers)) return 0
+  let total = 0
+  const mulRe = /[×xX✕✖](\d+(?:\.\d+)?)/
+  for (const w of workers) {
+    const name = String(w || '').trim()
+    if (!name) continue
+    const m = name.match(mulRe)
+    if (m) {
+      const n = Number(m[1]) || 0
+      total += n > 0 ? n : 1
+    } else {
+      total += 1
+    }
+  }
+  return total
+}
+
 // 「(見積り書有り)」「(見積り書無し)」「(仮称)」等の現場名に余分な接頭/接尾括弧を除去
 function stripQuoteParen(s: string): string {
   return s
@@ -740,7 +764,8 @@ function extractWorkDate(text: string, fallback: string): string {
 // 解析ルール:
 //   - 「=」または「応援=」で始まる行は **人員名のみ** として扱い、現場名・部位候補から完全に除外
 //   - 1行目を ‼️ で分割し、「○人目」を含むセグメントの直後を現場名、次を部位、それ以降を住所/メモとして読み飛ばす
-//   - 数量・人工数・運搬車両は行を問わずブロック全体から正規表現で抽出
+//   - 数量・運搬車両は行を問わずブロック全体から正規表現で抽出
+//   - 人工数は「○人目」(通し番号の可能性) からは抽出せず、workers から計算 (calcManpowerFromWorkers)
 //   - 日付はブロック内からは抽出しない（住所の "1-12-1/3号地" 等の誤検知防止）。呼び出し側で fallbackDate を渡す。
 function parseBlock(rawBlock: string, fallbackDate: string): ParsedBlock | null {
   const warnings: string[] = []
@@ -762,15 +787,12 @@ function parseBlock(rawBlock: string, fallbackDate: string): ParsedBlock | null 
   }
   if (!otherLines.length) return null
 
-  // === 数量 / 人工数 / 運搬車両 はブロック全体から抽出 ===
+  // === 数量 / 運搬車両 はブロック全体から抽出 ===
+  // (「○人目」は通し番号の可能性があるため人工数として使わない)
   let quantity = 0
-  let manpower = 0
   const qm = rawBlock.match(/約?\s*([\d,]+)\s*[KkＫ]/)
   if (qm) quantity = Number(qm[1].replace(/,/g, '')) || 0
-  const mm = rawBlock.match(/(\d+(?:\.\d+)?)\s*人\s*目/)
-  if (mm) manpower = Number(mm[1]) || 0
   if (!quantity) warnings.push('数量を読み取れませんでした')
-  if (!manpower) warnings.push('人工数を読み取れませんでした')
 
   const vm = rawBlock.match(/(\d+\s*[トt]\s*[ンン]\s*(?:運搬|ダンプ|車))/)
   const vehicle_note = vm ? cleanSegment(vm[1]).replace(/\s+/g, '') : ''
@@ -791,8 +813,16 @@ function parseBlock(rawBlock: string, fallbackDate: string): ParsedBlock | null 
       workers.push(...ws)
     }
   }
+  // 重複除去 (同じ表記の人員名が複数回出現した場合は1つに)
   workers = Array.from(new Set(workers))
   if (!workers.length) warnings.push('人員名を読み取れませんでした')
+
+  // === 人工数: 人員名リストから計算 ===
+  // ルール:
+  //   - 「×N」「xN」「XN」が付いている場合は N を加算 (例: 小泉組×4 → 4)
+  //   - 無ければ 1 を加算 (例: 中村隆 → 1)
+  const manpower = calcManpowerFromWorkers(workers)
+  if (!manpower) warnings.push('人工数を読み取れませんでした')
 
   // === 元請 / 現場名 / 部位 を otherLines の1行目から位置ベースで抽出 ===
   let contractor = ''

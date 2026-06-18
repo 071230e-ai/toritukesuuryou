@@ -840,6 +840,31 @@
     renderImportBlocks();
   }
 
+  // 人員名テキスト (「、」「,」「，」区切り) から人工数を自動計算
+  // ルール:
+  //   - 「×N」「xN」「XN」「✕N」「✖N」が付いていれば N を加算 (倍数記号は全角×と半角x/Xに対応)
+  //   - 無ければ 1 を加算
+  // 例: "中村隆、中村清、小泉組×4" → 1 + 1 + 4 = 6
+  function calcManpowerFromWorkersText(text) {
+    if (!text) return 0;
+    const list = String(text)
+      .split(/[、,，\s]+/)
+      .map(s => s.trim())
+      .filter(Boolean);
+    const mulRe = /[×xX✕✖](\d+(?:\.\d+)?)/;
+    let total = 0;
+    for (const w of list) {
+      const m = w.match(mulRe);
+      if (m) {
+        const n = Number(m[1]) || 0;
+        total += n > 0 ? n : 1;
+      } else {
+        total += 1;
+      }
+    }
+    return total;
+  }
+
   function findExistingSite(contractor, site_name) {
     const c = (contractor || '').trim();
     const n = (site_name || '').trim();
@@ -992,12 +1017,12 @@
               <input type="number" step="0.01" min="0" inputmode="decimal" data-im-field="quantity" data-im-i="${i}" value="${b.quantity || 0}" class="w-full border rounded px-2 py-1.5 text-sm text-right" />
             </div>
             <div>
-              <label class="block text-[11px] text-slate-500 mb-0.5">人工数</label>
+              <label class="block text-[11px] text-slate-500 mb-0.5">人工数 <span class="text-[10px] text-slate-400">(人員名から自動計算)</span></label>
               <input type="number" step="0.1" min="0" inputmode="decimal" data-im-field="manpower" data-im-i="${i}" value="${b.manpower || 0}" class="w-full border rounded px-2 py-1.5 text-sm text-right" />
             </div>
             <div class="sm:col-span-2">
-              <label class="block text-[11px] text-slate-500 mb-0.5">人員名 (、または , 区切り)</label>
-              <input type="text" data-im-field="workers_text" data-im-i="${i}" value="${esc(b.workers_text)}" class="w-full border rounded px-2 py-1.5 text-sm" placeholder="例: 中村隆、中村清" />
+              <label class="block text-[11px] text-slate-500 mb-0.5">人員名 (、または , 区切り。×2 は2人工として加算)</label>
+              <input type="text" data-im-field="workers_text" data-im-i="${i}" value="${esc(b.workers_text)}" class="w-full border rounded px-2 py-1.5 text-sm" placeholder="例: 中村隆、中村清、小泉組×4" />
             </div>
             <div class="sm:col-span-2">
               <label class="block text-[11px] text-slate-500 mb-0.5">運搬車両メモ</label>
@@ -1024,6 +1049,15 @@
     if (state.importBlocks[i].commit_status === 'ng') {
       state.importBlocks[i].commit_status = '';
       state.importBlocks[i].commit_error = '';
+    }
+    // 人員名テキストを編集したら人工数を再計算して反映 (DOMにも書き戻す)
+    if (field === 'workers_text') {
+      const newMp = calcManpowerFromWorkersText(v);
+      state.importBlocks[i].manpower = newMp;
+      const mpInput = document.querySelector(`[data-im-i="${i}"][data-im-field="manpower"]`);
+      if (mpInput && document.activeElement !== mpInput) {
+        mpInput.value = String(newMp);
+      }
     }
     // 数量・部位・現場・元請の変更で既存マッチが変わる可能性 → 再描画(マッチバッジと衝突表示更新)
     if (field === 'contractor' || field === 'site_name' || field === 'part' || field === 'quantity') {
