@@ -1,0 +1,57 @@
+/* 村田鉄筋㈱ 取付数量分析アプリ */
+html, body { -webkit-tap-highlight-color: transparent; }
+
+/* タブパネル切替 */
+.tab-pane { animation: fadeIn 0.18s ease-out; }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+/* 入力フォーカス時の見やすさ */
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.4);
+  border-color: #2563eb;
+}
+
+/* テーブル行ホバー */
+tbody tr:hover { background-color: #f8fafc; }
+
+/* チップ（人員名） */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #dbeafe;
+  color: #1e40af;
+  padding: 4px 10px;
+  border-radius: 9999px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.chip button {
+  background: transparent;
+  color: #1e40af;
+  font-weight: bold;
+  line-height: 1;
+}
+
+/* スマホ最適化 */
+@media (max-width: 640px) {
+  input[type="date"], input[type="number"], input[type="text"], select, textarea {
+    font-size: 16px; /* iOS のズーム防止 */
+  }
+  table { font-size: 13px; }
+}
+
+/* テーブル小さなボタン */
+.btn-mini {
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* 操作ボタン */
+.btn-edit { background: #2563eb; color: #fff; }
+.btn-edit:hover { background: #1d4ed8; }
+.btn-del { background: #dc2626; color: #fff; }
+.btn-del:hover { background: #b91c1c; }
