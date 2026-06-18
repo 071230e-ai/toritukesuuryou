@@ -250,6 +250,7 @@ interface InstallPayload {
   manpower: number
   delivery_vehicles?: number
   commute_vehicles?: number
+  vehicle_note?: string
   workers?: string[]
   note?: string
 }
@@ -258,7 +259,8 @@ interface InstallPayload {
 api.get('/site-parts/:id/installations', async (c) => {
   const id = Number(c.req.param('id'))
   const { results } = await c.env.DB.prepare(`
-    SELECT i.id, i.work_date, i.manpower, i.delivery_vehicles, i.commute_vehicles, i.note,
+    SELECT i.id, i.work_date, i.manpower, i.delivery_vehicles, i.commute_vehicles,
+      COALESCE(i.vehicle_note, '') AS vehicle_note, i.note,
       (SELECT GROUP_CONCAT(worker_name, ',') FROM installation_workers w WHERE w.installation_id = i.id) AS workers
     FROM installations i WHERE i.site_part_id = ?
     ORDER BY i.work_date DESC, i.id DESC
@@ -285,7 +287,8 @@ api.get('/installations', async (c) => {
   const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : ''
   const sql = `
     SELECT i.id, i.site_part_id, i.work_date, sp.part, sp.quantity AS registered_qty,
-      i.manpower, i.delivery_vehicles, i.commute_vehicles, i.note,
+      i.manpower, i.delivery_vehicles, i.commute_vehicles,
+      COALESCE(i.vehicle_note, '') AS vehicle_note, i.note,
       s.contractor, s.site_name, s.id AS site_id,
       (SELECT GROUP_CONCAT(worker_name, ',') FROM installation_workers w WHERE w.installation_id = i.id) AS workers
     FROM installations i
@@ -326,15 +329,16 @@ api.post('/installations', async (c) => {
   const mp = Number(body.manpower) || 0
   const dv = Math.max(0, Math.floor(Number(body.delivery_vehicles) || 0))
   const cv = Math.max(0, Math.floor(Number(body.commute_vehicles) || 0))
+  const vn = (body.vehicle_note ?? '').toString().trim()
 
   const r = await c.env.DB.prepare(`
     INSERT INTO installations
       (site_part_id, site_id, work_date, contractor, site_name, part,
-       quantity, manpower, delivery_vehicles, commute_vehicles, note)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       quantity, manpower, delivery_vehicles, commute_vehicles, vehicle_note, note)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).bind(
     sp.id, sp.site_id, body.work_date, sp.contractor, sp.site_name, sp.part,
-    0, mp, dv, cv, body.note ?? ''
+    0, mp, dv, cv, vn, body.note ?? ''
   ).run()
   const id = r.meta.last_row_id as number
   if (body.workers?.length) {
@@ -361,16 +365,17 @@ api.put('/installations/:id', async (c) => {
   const mp = Number(body.manpower) || 0
   const dv = Math.max(0, Math.floor(Number(body.delivery_vehicles) || 0))
   const cv = Math.max(0, Math.floor(Number(body.commute_vehicles) || 0))
+  const vn = (body.vehicle_note ?? '').toString().trim()
 
   await c.env.DB.prepare(`
     UPDATE installations SET
       site_part_id = ?, site_id = ?, work_date = ?, contractor = ?, site_name = ?, part = ?,
-      manpower = ?, delivery_vehicles = ?, commute_vehicles = ?, note = ?,
+      manpower = ?, delivery_vehicles = ?, commute_vehicles = ?, vehicle_note = ?, note = ?,
       updated_at = CURRENT_TIMESTAMP
     WHERE id = ?
   `).bind(
     sp.id, sp.site_id, body.work_date, sp.contractor, sp.site_name, sp.part,
-    mp, dv, cv, body.note ?? '', id
+    mp, dv, cv, vn, body.note ?? '', id
   ).run()
   await c.env.DB.prepare('DELETE FROM installation_workers WHERE installation_id = ?').bind(id).run()
   if (body.workers?.length) {
@@ -588,6 +593,397 @@ api.get('/analytics/parts', async (c) => {
   `
   const { results } = await c.env.DB.prepare(sql).bind(...onParams, ...params).all()
   return c.json(results)
+})
+
+// ============================================================
+// テキスト取込（予定表貼り付けからの自動読み取り）
+// ============================================================
+interface ParsedBlock {
+  contractor: string
+  site_name: string
+  part: string
+  quantity: number
+  manpower: number
+  workers: string[]
+  vehicle_note: string
+  work_date: string         // YYYY-MM-DD（テキストから読み取れた場合は反映、フォーム指定があれば優先）
+  raw: string               // 元テキスト（修正画面で参照用）
+  warnings: string[]        // 読み取りに失敗した項目の警告
+}
+
+// ノイズ除去: 一行内/セグメント単位の不要文字
+function cleanSegment(s: string): string {
+  return s
+    .replace(/[‼❗]+/g, '')          // ‼️ 強調記号
+    .replace(/[️]/g, '')              // 異体字セレクタ
+    .replace(/[!！。]+$/g, '')        // 末尾の記号
+    .trim()
+}
+
+// 「6/18日の予定」「2026/6/18」「6月18日」を YYYY-MM-DD に変換
+// 住所の "1-12-1/3号地" のような誤抽出を避けるため、M/D は必ず "日" または "の予定" を伴うことを要求する
+function extractWorkDate(text: string, fallback: string): string {
+  // 1. YYYY/M/D or YYYY-M-D
+  const m1 = text.match(/(20\d{2})[\/\-](\d{1,2})[\/\-](\d{1,2})/)
+  if (m1) {
+    const y = m1[1], mo = m1[2].padStart(2, '0'), d = m1[3].padStart(2, '0')
+    return `${y}-${mo}-${d}`
+  }
+  // 2. M/D日 (必ず「日」を伴う) + 任意で「の予定」
+  const m2 = text.match(/(\d{1,2})\s*\/\s*(\d{1,2})\s*日(?:の予定)?/)
+  if (m2) {
+    const m = Number(m2[1])
+    const d = Number(m2[2])
+    if (m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+      const now = new Date()
+      const y = String(now.getFullYear())
+      return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`
+    }
+  }
+  // 3. M月D日
+  const m3 = text.match(/(\d{1,2})\s*月\s*(\d{1,2})\s*日/)
+  if (m3) {
+    const m = Number(m3[1])
+    const d = Number(m3[2])
+    if (m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+      const now = new Date()
+      const y = String(now.getFullYear())
+      return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`
+    }
+  }
+  return fallback
+}
+
+// 1ブロック (空行区切り) のパース
+function parseBlock(rawBlock: string, fallbackDate: string): ParsedBlock | null {
+  const warnings: string[] = []
+  const lines = rawBlock.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
+  if (!lines.length) return null
+
+  // 行を結合して ‼️ / , / 、 で分割（,/、はセグメント内の小区切り）
+  const flat = lines.join('‼️')
+  // ‼️ または改行ベース、また 、 ','で分割するが、これは項目間の区切りに使うことが多い
+  // まず ‼️ で大きく分け、その後 、 や ',' は元請ヘッダ部の小区切りに使う
+  const bigSegs = flat.split(/[‼❗]+️?/u).map(cleanSegment).filter(Boolean)
+  if (!bigSegs.length) return null
+
+  // === 数量 / 人工数 をブロック全体から拾う ===
+  let quantity = 0
+  let manpower = 0
+  const qm = rawBlock.match(/約?\s*([\d,]+)\s*[KkＫ]/)
+  if (qm) quantity = Number(qm[1].replace(/,/g, '')) || 0
+  const mm = rawBlock.match(/(\d+(?:\.\d+)?)\s*人\s*目/)
+  if (mm) manpower = Number(mm[1]) || 0
+  if (!quantity) warnings.push('数量を読み取れませんでした')
+  if (!manpower) warnings.push('人工数を読み取れませんでした')
+
+  // === 運搬車両 ===
+  const vm = rawBlock.match(/(\d+\s*[トt]\s*[ンン]\s*(?:運搬|ダンプ|車))/)
+  const vehicle_note = vm ? cleanSegment(vm[1]).replace(/\s+/g, '') : ''
+  // 単独で「2トンダンプ」「3トン運搬」など segs 内の独立要素として現れている場合もカバー (上のregexで概ねOK)
+
+  // === 人員名: "=" または "応援=" 以降を抽出 ===
+  let workers: string[] = []
+  // ブロック全体から =... を取り出す（複数行対応）
+  const eqMatches = rawBlock.match(/(?:応援\s*)?=([^\n=]+)/g) || []
+  for (const em of eqMatches) {
+    const body = em.replace(/^.*?=/, '').trim()
+    // ‼️、、, で分割し、空 / 記号のみを除外
+    const ws = body
+      .split(/[‼❗、,，]+️?/u)
+      .map(cleanSegment)
+      .map(w => w.replace(/[‼️!！]+/g, '').trim())
+      .filter(w => w && !/^\(.*\)$/.test(w))
+    workers.push(...ws)
+  }
+  // 重複除去
+  workers = Array.from(new Set(workers))
+  if (!workers.length) warnings.push('人員名を読み取れませんでした')
+
+  // === 元請 / 現場名 / 部位 を big segs から拾う ===
+  // 最初の segment は「アムザ工務店、3日目、9960K、16人目」のような複合行になっている可能性がある
+  // → 、/, で分割した先頭が「元請」
+  let contractor = ''
+  let site_name = ''
+  let part = ''
+
+  // 最初の big seg のさらに小分割（、, で）
+  const headParts = bigSegs[0].split(/[、,，]/).map(s => cleanSegment(s)).filter(Boolean)
+  if (headParts.length) contractor = headParts[0]
+
+  // 除外キーワード（住所/メモ系）
+  const excludeKw = /^(?:[\d]+日目|約?[\d,]+[KkＫ]|[\d]+人目|終了予定|終わり次第|第\s*[一二三]\s*工場|.*時着|.*時～|.*時〜|.*~|.*～|.*〜|.*朝礼|.*配筋検査|.*検査|.*エブリ$|.*エブリ\b|プロボックス|ハイエース|高速代車|駐車場代.*|.*請求.*|岩田鉄筋取り付け|旧.*|.*車$|終了)/u
+  // 住所判定: より強い住所パターン（市・区・丁目・番地・号地・付近、または番地数字を含む）
+  const addressKw = /(?:[都道府県市区郡]\S{0,15}(?:町|村|丁目|番地|付近)|\d+丁目|\d+番地|\d+号地|号地|付近$|擁壁$|[A-Za-z\d]+-\d+(?:-\d+)?|京都\S*区|大阪\S*区|阿倍野|伏見|下京|上京|中京|右京|左京|西京|北区|南区|東山|山科|亀岡|茨木)/
+  // 部位キーワード (優先採用)
+  const partKw = /(?:基礎|柱|梁|壁|スラブ|土間|枕梁|止水壁|擁壁|機械基礎|^[\d０-９]+F|地中梁|杭|フーチング)/u
+
+  // 残りの segs（先頭は元請複合行なので除く）
+  const restSegs = [...headParts.slice(1), ...bigSegs.slice(1)]
+
+  // 部位らしいセグメントを先に拾う候補 / 現場名候補
+  const candidates: string[] = []
+  // 住所判定で弾かれたものをフォールバック用に保持（全て弾かれた場合に現場名として救済）
+  const addressLike: string[] = []
+
+  for (const s of restSegs) {
+    const seg = s.replace(/\s+/g, '')
+    if (!seg) continue
+    // "=" で始まる人員リスト行は除外（人員は別途処理済み）
+    if (/^[応援]*\s*[=＝]/.test(seg)) continue
+    if (/[=＝]/.test(seg)) continue
+    if (excludeKw.test(seg)) continue
+    // 数量・人工数・日数のセグメント単体
+    if (/^約?[\d,]+[KkＫ]$/.test(seg)) continue
+    if (/^[\d]+人目$/.test(seg)) continue
+    if (/^[\d]+日目$/.test(seg)) continue
+    // 運搬車両セグメントは vehicle_note に拾い済み
+    if (/^\d+\s*[トt][ンン](?:運搬|ダンプ|車)/.test(seg)) continue
+    // "○○君エブリ" のような車両メモ
+    if (/エブリ|プロボックス|ハイエース/.test(seg) && seg.length < 20) continue
+    if (/^(?:8|9|10|11|12|13|14|15|16|17)時/.test(seg)) continue
+
+    // 括弧除去（見積り書有り/無し 等）
+    const cleaned = seg.replace(/[（(][^）)]*[)）]/g, '').trim()
+    if (!cleaned) continue
+
+    // 住所判定
+    if (addressKw.test(cleaned)) {
+      addressLike.push(cleaned)
+      continue
+    }
+
+    candidates.push(cleaned)
+  }
+
+  // すべて住所判定で弾かれて site_name候補が無い場合、最初の addressLike を現場名として救済
+  // (例: 「北春日丘1-12-1/3号地擁壁」のような住所形式の現場名)
+  if (candidates.length === 0 && addressLike.length > 0) {
+    candidates.push(addressLike[0])
+  }
+
+  // candidates から、部位っぽいものは part 候補、それ以外は site_name 候補
+  // 通常の予定表は「現場名 → 部位 → 住所 …」の順なので、最初の非住所セグメントが現場名
+  // 2番目以降に部位キーワードが現れるものを part として採用
+  for (const c of candidates) {
+    if (!site_name) {
+      site_name = c
+      continue
+    }
+    if (!part) {
+      part = c
+      continue
+    }
+    // それ以降: 部位キーワードを含み、まだ part が部位パターンに合致してなければ上書き
+    if (partKw.test(c) && !partKw.test(part)) {
+      part = c
+    }
+  }
+
+  // 安全策: site_name が部位っぽくて、かつ part が空 → 入れ替え
+  if (site_name && !part && partKw.test(site_name) && site_name.length <= 12) {
+    part = site_name
+    site_name = ''
+  }
+
+  if (!contractor) warnings.push('元請を読み取れませんでした')
+  if (!site_name)  warnings.push('現場名を読み取れませんでした')
+  if (!part)       warnings.push('部位を読み取れませんでした')
+
+  const work_date = extractWorkDate(rawBlock, fallbackDate)
+
+  return {
+    contractor,
+    site_name,
+    part,
+    quantity,
+    manpower,
+    workers,
+    vehicle_note,
+    work_date,
+    raw: rawBlock.trim(),
+    warnings,
+  }
+}
+
+// 全体テキストのパース
+api.post('/import/parse', async (c) => {
+  const body = await c.req.json<{ text: string; work_date?: string; form_date?: string }>()
+  const text = body.text
+  // フロントは form_date で送ってくる。互換のため work_date も受け付ける
+  const work_date = (body.form_date || body.work_date || '').trim()
+  if (!text || !text.trim()) return c.json({ error: 'テキストが空です' }, 400)
+
+  // ヘッダ行（"6/18日の予定です" のような）からデフォルト日付を取得
+  const lines = text.split(/\r?\n/)
+  // 1ブロックずつ。空行で区切り。
+  const blocks: string[] = []
+  let buf: string[] = []
+  for (const line of lines) {
+    if (line.trim() === '') {
+      if (buf.length) { blocks.push(buf.join('\n')); buf = [] }
+    } else {
+      buf.push(line)
+    }
+  }
+  if (buf.length) blocks.push(buf.join('\n'))
+
+  // 全体先頭付近からの日付推定（"6/18日の予定です。"行など）
+  const headerSlice = lines.slice(0, 5).join(' ')
+  const headerDate = extractWorkDate(headerSlice, '')
+
+  // フォームの work_date が最優先、無ければ headerDate、それも無ければ各ブロック内部の日付、それも無ければ今日
+  const today = new Date().toISOString().slice(0, 10)
+  const baseDate = (work_date && work_date.trim()) || headerDate || today
+
+  const parsed: ParsedBlock[] = []
+  for (const b of blocks) {
+    // 単独行で「6/18日の予定です」のようなヘッダだけのブロックはスキップ
+    const cleaned = b.replace(/[‼❗️]/g, '').trim()
+    if (/^.{0,30}予定です\.?。?$/u.test(cleaned)) continue
+    if (/^.{0,30}の予定/u.test(cleaned) && cleaned.length < 30) continue
+
+    // 「=」「数量」「人工」のいずれも全く含まないブロックは予定表本文とみなさずスキップ
+    if (!/[=＝]/.test(b) && !/[\d,]+[KkＫ]/.test(b) && !/\d+人目/.test(b)) continue
+
+    const blk = parseBlock(b, baseDate)
+    if (blk) parsed.push(blk)
+  }
+
+  return c.json({ baseDate, blocks: parsed })
+})
+
+// パース結果をDB登録（3階層に upsert）
+interface CommitBlock {
+  contractor: string
+  site_name: string
+  part: string
+  quantity: number
+  manpower: number
+  workers: string[]
+  vehicle_note: string
+  work_date: string
+  qty_strategy?: 'keep' | 'overwrite' | 'add'   // 既存部位の数量との衝突時
+}
+
+api.post('/import/commit', async (c) => {
+  const { blocks } = await c.req.json<{ blocks: CommitBlock[] }>()
+  if (!Array.isArray(blocks) || !blocks.length) return c.json({ error: '登録対象がありません' }, 400)
+
+  const results: Array<{ index: number; ok: boolean; site_id?: number; site_part_id?: number; installation_id?: number; error?: string; note?: string }> = []
+
+  for (let i = 0; i < blocks.length; i++) {
+    const b = blocks[i]
+    try {
+      if (!b.contractor?.trim() || !b.site_name?.trim()) {
+        results.push({ index: i, ok: false, error: '元請または現場名が未入力です' })
+        continue
+      }
+      if (!b.part?.trim()) {
+        results.push({ index: i, ok: false, error: '部位が未入力です' })
+        continue
+      }
+      if (!b.work_date) {
+        results.push({ index: i, ok: false, error: '取付日が未入力です' })
+        continue
+      }
+      const contractor = b.contractor.trim()
+      const site_name = b.site_name.trim()
+      const part = b.part.trim()
+
+      // 1. 現場の upsert
+      let site = await c.env.DB.prepare(
+        'SELECT id FROM sites WHERE contractor = ? AND site_name = ?'
+      ).bind(contractor, site_name).first<{ id: number }>()
+      let site_id: number
+      if (site) {
+        site_id = site.id
+      } else {
+        const r = await c.env.DB.prepare(
+          'INSERT INTO sites (contractor, site_name) VALUES (?, ?)'
+        ).bind(contractor, site_name).run()
+        site_id = r.meta.last_row_id as number
+      }
+
+      // 2. 部位 (site_parts) の upsert
+      const sp = await c.env.DB.prepare(
+        'SELECT id, quantity FROM site_parts WHERE site_id = ? AND part = ?'
+      ).bind(site_id, part).first<{ id: number; quantity: number }>()
+      let site_part_id: number
+      let qtyNote = ''
+      const newQty = Number(b.quantity) || 0
+      const strat = b.qty_strategy || 'keep'
+
+      if (sp) {
+        site_part_id = sp.id
+        const oldQty = Number(sp.quantity) || 0
+        if (newQty > 0 && oldQty !== newQty) {
+          if (strat === 'overwrite') {
+            await c.env.DB.prepare(
+              'UPDATE site_parts SET quantity = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
+            ).bind(newQty, sp.id).run()
+            qtyNote = `数量を ${oldQty} → ${newQty} に上書き`
+          } else if (strat === 'add') {
+            const sumQty = oldQty + newQty
+            await c.env.DB.prepare(
+              'UPDATE site_parts SET quantity = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
+            ).bind(sumQty, sp.id).run()
+            qtyNote = `数量を ${oldQty} + ${newQty} = ${sumQty} に加算`
+          } else {
+            qtyNote = `数量は既存値 ${oldQty} のまま (取込値 ${newQty} は適用せず)`
+          }
+        }
+      } else {
+        const r = await c.env.DB.prepare(
+          'INSERT INTO site_parts (site_id, part, quantity, note) VALUES (?, ?, ?, ?)'
+        ).bind(site_id, part, newQty, '').run()
+        site_part_id = r.meta.last_row_id as number
+      }
+
+      // 3. 取付実績 (installations) の登録
+      const mp = Number(b.manpower) || 0
+      const vn = (b.vehicle_note || '').toString().trim()
+      const ins = await c.env.DB.prepare(`
+        INSERT INTO installations
+          (site_part_id, site_id, work_date, contractor, site_name, part,
+           quantity, manpower, delivery_vehicles, commute_vehicles, vehicle_note, note)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).bind(
+        site_part_id, site_id, b.work_date, contractor, site_name, part,
+        0, mp, 0, 0, vn, ''
+      ).run()
+      const installation_id = ins.meta.last_row_id as number
+
+      // 4. 人員名
+      if (Array.isArray(b.workers)) {
+        for (const w of b.workers) {
+          const name = (w || '').toString().trim()
+          if (!name) continue
+          await c.env.DB.prepare(
+            'INSERT INTO installation_workers (installation_id, worker_name) VALUES (?, ?)'
+          ).bind(installation_id, name).run()
+        }
+      }
+
+      results.push({ index: i, ok: true, site_id, site_part_id, installation_id, note: qtyNote })
+    } catch (e: any) {
+      results.push({ index: i, ok: false, error: String(e?.message || e) })
+    }
+  }
+
+  return c.json({ results })
+})
+
+// 既存 site の (contractor, site_name) 一覧 + 既存 site_parts (site_id, part) 一覧
+// 取込画面で「既存と一致するか」を事前判定するためのデータを返す
+api.get('/import/existing', async (c) => {
+  const sites = await c.env.DB.prepare(
+    'SELECT id, contractor, site_name FROM sites'
+  ).all()
+  const parts = await c.env.DB.prepare(
+    'SELECT sp.id, sp.site_id, sp.part, sp.quantity FROM site_parts sp'
+  ).all()
+  return c.json({ sites: sites.results, site_parts: parts.results })
 })
 
 export default api

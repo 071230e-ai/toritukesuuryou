@@ -25,6 +25,9 @@
     installations: [],  // 現在の部位の取付実績
     ixWorkers: [],      // 取付実績フォームに現在追加されている人員名
     charts: {},
+    // テキスト取込用
+    importBlocks: [],   // 読み取り済みブロック (編集可)
+    importExisting: { sites: [], site_parts: [] }, // 既存マッチ判定用
   };
 
   // ============================================================
@@ -66,6 +69,7 @@
     if (name === 'dashboard')    loadDashboard();
     if (name === 'analysis')     loadAnalysis();
     if (name === 'settings')     loadParts(true);
+    if (name === 'import')       loadImportTab();
   }
 
   function renderBreadcrumb(name) {
@@ -813,6 +817,286 @@
   }
 
   // ============================================================
+  // テキスト取込 (予定表貼り付け)
+  // ============================================================
+  async function loadImportTab() {
+    // 既存サイト・部位の一覧を取得 (重複判定用)
+    try {
+      const { data } = await api.get('/import/existing');
+      state.importExisting = data || { sites: [], site_parts: [] };
+    } catch (e) {
+      state.importExisting = { sites: [], site_parts: [] };
+    }
+    // 既に読み取り結果がある場合は表示維持
+    renderImportBlocks();
+  }
+
+  function findExistingSite(contractor, site_name) {
+    const c = (contractor || '').trim();
+    const n = (site_name || '').trim();
+    if (!c || !n) return null;
+    return (state.importExisting.sites || []).find(
+      s => (s.contractor || '').trim() === c && (s.site_name || '').trim() === n
+    ) || null;
+  }
+  function findExistingSitePart(site_id, part) {
+    if (!site_id) return null;
+    const p = (part || '').trim();
+    return (state.importExisting.site_parts || []).find(
+      sp => sp.site_id === site_id && (sp.part || '').trim() === p
+    ) || null;
+  }
+
+  async function parseImport() {
+    const text = ($('#im-text')?.value || '').trim();
+    if (!text) { toast('テキストを貼り付けてください', true); return; }
+    const formDate = $('#im-date')?.value || '';
+    try {
+      const { data } = await api.post('/import/parse', { text, form_date: formDate });
+      const blocks = (data && data.blocks) || [];
+      // 各ブロックを編集用にコピー (workers は配列を文字列化して編集UIに渡す)
+      state.importBlocks = blocks.map((b, i) => ({
+        idx: i,
+        contractor: b.contractor || '',
+        site_name: b.site_name || '',
+        part: b.part || '',
+        quantity: Number(b.quantity || 0),
+        manpower: Number(b.manpower || 0),
+        workers_text: (b.workers || []).join('、'),
+        vehicle_note: b.vehicle_note || '',
+        work_date: b.work_date || formDate || todayStr(),
+        warnings: b.warnings || [],
+        qty_strategy: 'overwrite', // 既存数量と異なる時のデフォルト
+      }));
+      // 既存リスト最新化
+      try {
+        const ex = await api.get('/import/existing');
+        state.importExisting = ex.data || { sites: [], site_parts: [] };
+      } catch {}
+      $('#im-result-wrap')?.classList.remove('hidden');
+      $('#im-summary').textContent = String(state.importBlocks.length);
+      renderImportBlocks();
+      if (state.importBlocks.length === 0) {
+        toast('読み取り結果が0件でした。テキストを確認してください', true);
+      } else {
+        toast(`${state.importBlocks.length} 件読み取りました`);
+      }
+    } catch (e) {
+      apiErr(e, 'テキスト読み取りに失敗');
+    }
+  }
+
+  function todayStr() {
+    const d = new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${dd}`;
+  }
+
+  function renderImportBlocks() {
+    const wrap = $('#im-list');
+    if (!wrap) return;
+    if (!state.importBlocks.length) {
+      wrap.innerHTML = '';
+      return;
+    }
+    const html = state.importBlocks.map((b, i) => {
+      const existSite = findExistingSite(b.contractor, b.site_name);
+      const existPart = existSite ? findExistingSitePart(existSite.id, b.part) : null;
+      const qtyConflict = !!(existPart && Number(existPart.quantity) !== Number(b.quantity) && b.quantity > 0);
+      const warnHtml = (b.warnings || []).length
+        ? `<div class="text-[11px] text-orange-700 bg-orange-50 border border-orange-200 rounded px-2 py-1 mt-1"><i class="fas fa-triangle-exclamation mr-1"></i>${b.warnings.map(esc).join(' / ')}</div>` : '';
+      const matchHtml = [
+        existSite ? `<span class="inline-block bg-blue-100 text-blue-800 text-[10px] rounded px-1.5 py-0.5 mr-1"><i class="fas fa-link mr-0.5"></i>既存現場に紐付け</span>` : `<span class="inline-block bg-green-100 text-green-800 text-[10px] rounded px-1.5 py-0.5 mr-1"><i class="fas fa-plus mr-0.5"></i>新規現場</span>`,
+        existPart ? `<span class="inline-block bg-blue-100 text-blue-800 text-[10px] rounded px-1.5 py-0.5"><i class="fas fa-link mr-0.5"></i>既存部位 (現:${fmt(existPart.quantity)}kg)</span>` : (b.part ? `<span class="inline-block bg-green-100 text-green-800 text-[10px] rounded px-1.5 py-0.5"><i class="fas fa-plus mr-0.5"></i>新規部位</span>` : ''),
+      ].join('');
+      const qtyConflictHtml = qtyConflict ? `
+        <div class="mt-2 p-2 bg-amber-50 border border-amber-300 rounded text-[12px]">
+          <div class="text-amber-800 font-semibold mb-1"><i class="fas fa-triangle-exclamation mr-1"></i>同じ部位に既に数量があります (既存: ${fmt(existPart.quantity)}kg / 読取: ${fmt(b.quantity)}kg)</div>
+          <div class="flex flex-wrap gap-3">
+            <label class="inline-flex items-center gap-1"><input type="radio" name="qty-strategy-${i}" value="overwrite" ${b.qty_strategy === 'overwrite' ? 'checked' : ''} data-im-qty="${i}" /> 上書き</label>
+            <label class="inline-flex items-center gap-1"><input type="radio" name="qty-strategy-${i}" value="add" ${b.qty_strategy === 'add' ? 'checked' : ''} data-im-qty="${i}" /> 加算</label>
+            <label class="inline-flex items-center gap-1"><input type="radio" name="qty-strategy-${i}" value="keep" ${b.qty_strategy === 'keep' ? 'checked' : ''} data-im-qty="${i}" /> 既存維持(数量変更なし)</label>
+          </div>
+        </div>` : '';
+      return `
+        <div class="bg-white rounded-lg shadow border border-slate-200 p-3" data-im-card="${i}">
+          <div class="flex items-center justify-between mb-2">
+            <div class="text-xs text-slate-500">ブロック #${i + 1}</div>
+            <div class="flex gap-1">
+              <button type="button" class="text-xs bg-red-100 hover:bg-red-200 text-red-700 px-2 py-1 rounded" data-im-remove="${i}"><i class="fas fa-trash mr-0.5"></i>削除</button>
+            </div>
+          </div>
+          <div class="mb-2">${matchHtml}</div>
+          ${warnHtml}
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-2">
+            <div>
+              <label class="block text-[11px] text-slate-500 mb-0.5">取付日 <span class="text-red-500">*</span></label>
+              <input type="date" data-im-field="work_date" data-im-i="${i}" value="${esc(b.work_date)}" class="w-full border rounded px-2 py-1.5 text-sm" />
+            </div>
+            <div>
+              <label class="block text-[11px] text-slate-500 mb-0.5">元請 <span class="text-red-500">*</span></label>
+              <input type="text" data-im-field="contractor" data-im-i="${i}" value="${esc(b.contractor)}" class="w-full border rounded px-2 py-1.5 text-sm" />
+            </div>
+            <div class="sm:col-span-2">
+              <label class="block text-[11px] text-slate-500 mb-0.5">現場名 <span class="text-red-500">*</span></label>
+              <input type="text" data-im-field="site_name" data-im-i="${i}" value="${esc(b.site_name)}" class="w-full border rounded px-2 py-1.5 text-sm" />
+            </div>
+            <div class="sm:col-span-2">
+              <label class="block text-[11px] text-slate-500 mb-0.5">部位</label>
+              <input type="text" data-im-field="part" data-im-i="${i}" value="${esc(b.part)}" class="w-full border rounded px-2 py-1.5 text-sm" placeholder="例: 基礎" />
+            </div>
+            <div>
+              <label class="block text-[11px] text-slate-500 mb-0.5">数量 (kg)</label>
+              <input type="number" step="0.01" min="0" inputmode="decimal" data-im-field="quantity" data-im-i="${i}" value="${b.quantity || 0}" class="w-full border rounded px-2 py-1.5 text-sm text-right" />
+            </div>
+            <div>
+              <label class="block text-[11px] text-slate-500 mb-0.5">人工数</label>
+              <input type="number" step="0.1" min="0" inputmode="decimal" data-im-field="manpower" data-im-i="${i}" value="${b.manpower || 0}" class="w-full border rounded px-2 py-1.5 text-sm text-right" />
+            </div>
+            <div class="sm:col-span-2">
+              <label class="block text-[11px] text-slate-500 mb-0.5">人員名 (、または , 区切り)</label>
+              <input type="text" data-im-field="workers_text" data-im-i="${i}" value="${esc(b.workers_text)}" class="w-full border rounded px-2 py-1.5 text-sm" placeholder="例: 中村隆、中村清" />
+            </div>
+            <div class="sm:col-span-2">
+              <label class="block text-[11px] text-slate-500 mb-0.5">運搬車両メモ</label>
+              <input type="text" data-im-field="vehicle_note" data-im-i="${i}" value="${esc(b.vehicle_note)}" class="w-full border rounded px-2 py-1.5 text-sm" placeholder="例: 4トン運搬" />
+            </div>
+          </div>
+          ${qtyConflictHtml}
+        </div>
+      `;
+    }).join('');
+    wrap.innerHTML = html;
+  }
+
+  function onImportFieldInput(e) {
+    const el = e.target.closest('[data-im-field]');
+    if (!el) return;
+    const i = Number(el.dataset.imI);
+    const field = el.dataset.imField;
+    if (!state.importBlocks[i]) return;
+    let v = el.value;
+    if (field === 'quantity' || field === 'manpower') v = Number(v) || 0;
+    state.importBlocks[i][field] = v;
+    // 数量・部位・現場・元請の変更で既存マッチが変わる可能性 → 再描画(マッチバッジと衝突表示更新)
+    if (field === 'contractor' || field === 'site_name' || field === 'part' || field === 'quantity') {
+      // フォーカス維持のため最小再描画: 即座に renderImportBlocks() を呼ぶとフォーカスが飛ぶので debounce
+      clearTimeout(window._imRe);
+      window._imRe = setTimeout(() => {
+        const active = document.activeElement;
+        const aSel = active && active.dataset && active.dataset.imField
+          ? `[data-im-i="${active.dataset.imI}"][data-im-field="${active.dataset.imField}"]`
+          : null;
+        const aStart = active && 'selectionStart' in active ? active.selectionStart : null;
+        const aEnd   = active && 'selectionEnd'   in active ? active.selectionEnd   : null;
+        renderImportBlocks();
+        if (aSel) {
+          const next = $(aSel);
+          if (next) {
+            next.focus();
+            try { if (aStart != null && aEnd != null) next.setSelectionRange(aStart, aEnd); } catch {}
+          }
+        }
+      }, 300);
+    }
+  }
+
+  function onImportQtyStrategyChange(e) {
+    const el = e.target.closest('[data-im-qty]');
+    if (!el) return;
+    const i = Number(el.dataset.imQty);
+    if (!state.importBlocks[i]) return;
+    state.importBlocks[i].qty_strategy = el.value;
+  }
+
+  function removeImportBlock(i) {
+    if (!state.importBlocks[i]) return;
+    state.importBlocks.splice(i, 1);
+    // インデックス振り直し
+    state.importBlocks.forEach((b, k) => (b.idx = k));
+    $('#im-summary').textContent = String(state.importBlocks.length);
+    renderImportBlocks();
+  }
+
+  function resetImport() {
+    if (state.importBlocks.length && !confirm('読み取り結果をクリアします。よろしいですか？')) return;
+    state.importBlocks = [];
+    const t = $('#im-text'); if (t) t.value = '';
+    const d = $('#im-date'); if (d) d.value = '';
+    $('#im-result-wrap')?.classList.add('hidden');
+    $('#im-list').innerHTML = '';
+    $('#im-summary').textContent = '0';
+  }
+
+  function cancelImport() {
+    if (state.importBlocks.length && !confirm('読み取り結果を破棄します。よろしいですか？')) return;
+    state.importBlocks = [];
+    $('#im-result-wrap')?.classList.add('hidden');
+    $('#im-list').innerHTML = '';
+    $('#im-summary').textContent = '0';
+  }
+
+  async function commitImport() {
+    if (!state.importBlocks.length) { toast('登録する内容がありません', true); return; }
+    // バリデーション: 元請/現場名/取付日 が必須
+    const errors = [];
+    state.importBlocks.forEach((b, i) => {
+      if (!b.contractor?.trim()) errors.push(`#${i + 1}: 元請が空欄`);
+      if (!b.site_name?.trim())  errors.push(`#${i + 1}: 現場名が空欄`);
+      if (!b.work_date)          errors.push(`#${i + 1}: 取付日が空欄`);
+    });
+    if (errors.length) {
+      alert('以下を修正してください:\n' + errors.join('\n'));
+      return;
+    }
+    if (!confirm(`${state.importBlocks.length} 件を登録します。よろしいですか？`)) return;
+
+    // workers_text → workers 配列 に変換
+    const blocks = state.importBlocks.map(b => ({
+      contractor: b.contractor.trim(),
+      site_name: b.site_name.trim(),
+      part: (b.part || '').trim(),
+      quantity: Number(b.quantity) || 0,
+      manpower: Number(b.manpower) || 0,
+      workers: (b.workers_text || '')
+        .split(/[、,，\s]+/).map(s => s.trim()).filter(Boolean),
+      vehicle_note: (b.vehicle_note || '').trim(),
+      work_date: b.work_date,
+      qty_strategy: b.qty_strategy || 'overwrite',
+    }));
+
+    try {
+      const { data } = await api.post('/import/commit', { blocks });
+      const results = data?.results || [];
+      const okCount  = results.filter(r => r.ok).length;
+      const ngCount  = results.length - okCount;
+      const noteList = results.filter(r => r.note).map(r => `#${r.index + 1}: ${r.note}`);
+      const errList  = results.filter(r => !r.ok).map(r => `#${r.index + 1}: ${r.error || '不明エラー'}`);
+      let msg = `登録完了: 成功 ${okCount} 件 / 失敗 ${ngCount} 件`;
+      if (noteList.length) msg += '\n\n[備考]\n' + noteList.join('\n');
+      if (errList.length)  msg += '\n\n[エラー]\n' + errList.join('\n');
+      alert(msg);
+      // クリア
+      state.importBlocks = [];
+      $('#im-text').value = '';
+      $('#im-result-wrap')?.classList.add('hidden');
+      $('#im-list').innerHTML = '';
+      $('#im-summary').textContent = '0';
+      // 既存リスト更新 + サジェスト再取得
+      try {
+        const ex = await api.get('/import/existing');
+        state.importExisting = ex.data || { sites: [], site_parts: [] };
+      } catch {}
+      await loadSuggestions();
+      toast(`登録完了 (成功 ${okCount} 件)`);
+    } catch (e) {
+      apiErr(e, '一括登録に失敗しました');
+    }
+  }
+
+  // ============================================================
   // イベント登録
   // ============================================================
   function bindEvents() {
@@ -917,6 +1201,27 @@
       const dl = e.target.closest('[data-part-del]');
       if (ed) editPart(ed.dataset.partEdit, ed.dataset.name);
       else if (dl) deletePart(dl.dataset.partDel);
+    });
+
+    // テキスト取込
+    $('#im-parse')?.addEventListener('click', parseImport);
+    $('#im-reset')?.addEventListener('click', resetImport);
+    $('#im-cancel')?.addEventListener('click', cancelImport);
+    $('#im-commit')?.addEventListener('click', commitImport);
+    // 動的フィールドの編集
+    document.addEventListener('input', (e) => {
+      if (e.target.closest && e.target.closest('[data-im-field]')) onImportFieldInput(e);
+    });
+    document.addEventListener('change', (e) => {
+      if (e.target.closest && e.target.closest('[data-im-qty]')) onImportQtyStrategyChange(e);
+    });
+    // 削除ボタン
+    document.addEventListener('click', (e) => {
+      const rm = e.target.closest('[data-im-remove]');
+      if (rm) {
+        const i = Number(rm.dataset.imRemove);
+        removeImportBlock(i);
+      }
     });
   }
 

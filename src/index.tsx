@@ -90,6 +90,9 @@ app.get('/', (c) => {
             <button data-tab="analysis" class="tab-btn px-4 py-2 text-sm font-semibold text-white/80 border-b-4 border-transparent">
               <i class="fas fa-magnifying-glass-chart mr-1"></i>集計・分析
             </button>
+            <button data-tab="import" class="tab-btn px-4 py-2 text-sm font-semibold text-white/80 border-b-4 border-transparent">
+              <i class="fas fa-file-import mr-1"></i>テキスト取込
+            </button>
             <button data-tab="settings" class="tab-btn px-4 py-2 text-sm font-semibold text-white/80 border-b-4 border-transparent">
               <i class="fas fa-gear mr-1"></i>部位マスタ
             </button>
@@ -433,6 +436,62 @@ app.get('/', (c) => {
               </thead>
               <tbody id="an-detail"></tbody>
             </table>
+          </div>
+        </section>
+
+        {/* ============== テキスト取込 ============== */}
+        <section id="tab-import" class="tab-pane hidden">
+          <h2 class="text-lg font-bold mb-3 text-slate-700 flex items-center gap-2">
+            <i class="fas fa-file-import text-blue-600"></i>テキスト取込（予定表貼り付け）
+          </h2>
+          <div class="bg-blue-50 border border-blue-200 rounded p-3 mb-3 text-xs text-blue-900 leading-relaxed">
+            <i class="fas fa-info-circle mr-1"></i>
+            予定表テキストを貼り付けて「読み取る」を押すと、元請・現場名・部位・数量・人工数・人員名・運搬車両を自動で抽出します。
+            内容を確認・修正してから「一括登録」で保存します。
+            <span class="block mt-1">※ 既存の現場・部位がある場合は自動で紐付けます。同じ部位の数量が既にある場合は確認します。</span>
+          </div>
+
+          {/* 入力エリア */}
+          <div class="bg-white rounded-lg shadow p-4 mb-3">
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-3">
+              <div class="sm:col-span-1">
+                <label class="block text-sm font-semibold text-slate-700 mb-1">取付日（任意・優先）</label>
+                <input type="date" id="im-date" class="w-full border rounded px-3 py-2 text-base" />
+                <div class="text-[10px] text-slate-400 mt-1">空欄ならテキスト内の日付を使用</div>
+              </div>
+              <div class="sm:col-span-2 flex items-end gap-2">
+                <button type="button" id="im-parse" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded text-base shadow">
+                  <i class="fas fa-magnifying-glass mr-1"></i>読み取る
+                </button>
+                <button type="button" id="im-reset" class="bg-slate-200 hover:bg-slate-300 text-slate-700 font-semibold px-4 py-3 rounded text-sm">
+                  <i class="fas fa-eraser mr-1"></i>クリア
+                </button>
+              </div>
+            </div>
+            <div>
+              <label class="block text-sm font-semibold text-slate-700 mb-1">テキスト貼り付け欄</label>
+              <textarea id="im-text" rows={10} placeholder={'例：\nアムザ工務店、3日目、9960K、16人目‼️高徳寺町マンション新築工事(見積り書有り)‼️基礎‼️上京区不動前町付近‼️\n=中村隆、中村清、小泉組×4‼️\n4トン運搬、13時着、村田(剛)‼️\n\n達建工木造、3日目、6264K、19人目‼️...'} class="w-full border rounded px-3 py-2 text-sm font-mono leading-relaxed"></textarea>
+              <div class="text-[10px] text-slate-400 mt-1">空行で1現場ブロックを区切ります</div>
+            </div>
+          </div>
+
+          {/* 読み取り結果 */}
+          <div id="im-result-wrap" class="hidden">
+            <div class="bg-white rounded-lg shadow p-3 mb-3 flex items-center justify-between flex-wrap gap-2">
+              <div class="text-sm text-slate-700">
+                <i class="fas fa-list-check text-blue-600 mr-1"></i>
+                読み取り結果：<span id="im-summary" class="font-bold text-blue-700">0</span> 件
+              </div>
+              <div class="flex gap-2">
+                <button type="button" id="im-commit" class="bg-green-600 hover:bg-green-700 text-white font-bold px-4 py-2 rounded text-sm shadow">
+                  <i class="fas fa-database mr-1"></i>一括登録
+                </button>
+                <button type="button" id="im-cancel" class="bg-slate-200 hover:bg-slate-300 text-slate-700 font-semibold px-4 py-2 rounded text-sm">
+                  <i class="fas fa-xmark mr-1"></i>キャンセル
+                </button>
+              </div>
+            </div>
+            <div id="im-list" class="space-y-3"></div>
           </div>
         </section>
 
