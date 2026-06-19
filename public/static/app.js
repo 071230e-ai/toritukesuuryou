@@ -1077,21 +1077,30 @@
     // 入力中はカード全体の再描画は行わない (renderImportBlocks は blur / compositionend / commit 直前で呼ぶ)
   }
 
-  // テキスト取込カード内の入力欄でフォーカスが外れた / IME確定したときの再計算・再描画
-  function onImportFieldCommit(e) {
+  // 値だけ反映する関数 (再描画は絶対にしない)
+  // 呼び出しタイミング:
+  //   - compositionend (IME変換確定直後)
+  //   - focusout (入力欄を離れた瞬間)
+  // この関数は renderImportBlocks() を呼ばないため、フォーカスが外れることはない。
+  function updateImportFieldValue(e) {
     const el = e.target.closest('[data-im-field]');
     if (!el) return;
     const i = Number(el.dataset.imI);
     const field = el.dataset.imField;
     if (!state.importBlocks[i]) return;
 
-    // 確定後の最新値で state を更新 (IME変換確定時点では el.value がまだ反映されないブラウザがあるため)
     let v = el.value;
     if (field === 'quantity' || field === 'manpower') v = Number(v) || 0;
     if (field === 'delivery_vehicles' || field === 'commute_vehicles') v = Math.max(0, Math.floor(Number(v) || 0));
     state.importBlocks[i][field] = v;
 
-    // 人員名 → 人工数 再計算 + DOM反映
+    // 内容を変更した瞬間、失敗状態 ('ng') を解除して再登録可能にする
+    if (state.importBlocks[i].commit_status === 'ng') {
+      state.importBlocks[i].commit_status = '';
+      state.importBlocks[i].commit_error = '';
+    }
+
+    // 人員名 → 人工数 再計算 + 人工数欄の DOM 値のみ更新 (カード全体は再描画しない)
     if (field === 'workers_text') {
       const newMp = calcManpowerFromWorkersText(v);
       state.importBlocks[i].manpower = newMp;
@@ -1100,21 +1109,16 @@
         mpInput.value = String(newMp);
       }
     }
+  }
 
-    // 元請・現場名・部位・数量の変更で既存マッチ表示が変わるので、ここで初めて再描画
-    // (入力中は再描画しないため、フォーカスが飛ぶ問題は発生しない)
+  // focusout の時だけ呼ぶ: 元請・現場名・部位・数量を変更した場合、既存マッチ表示を更新するため
+  // カード全体を再描画する。compositionend (Enterで変換確定) では呼ばないこと。
+  function refreshImportCardAfterBlur(e) {
+    const el = e.target.closest('[data-im-field]');
+    if (!el) return;
+    const field = el.dataset.imField;
     if (field === 'contractor' || field === 'site_name' || field === 'part' || field === 'quantity') {
-      // 同じ要素にフォーカスを戻すための情報を保存
-      const aSel = `[data-im-i="${i}"][data-im-field="${field}"]`;
-      const aStart = 'selectionStart' in el ? el.selectionStart : null;
-      const aEnd   = 'selectionEnd'   in el ? el.selectionEnd   : null;
       renderImportBlocks();
-      const next = $(aSel);
-      if (next && document.activeElement !== next) {
-        // blur 直後なのでフォーカスは戻さない(戻すと無限ループになりかねない)。
-        // ただしカーソル位置だけ復元しておく (再フォーカス時に違和感が出ないように)
-        try { if (aStart != null && aEnd != null) next.setSelectionRange(aStart, aEnd); } catch {}
-      }
     }
   }
 
@@ -1394,19 +1398,31 @@
         _imIsComposing = true;
       }
     });
+    // compositionend: 変換確定。値を state に反映するだけにし、カード全体の再描画は行わない。
+    // → Enterで漢字変換確定してもフォーカスが外れない。
     document.addEventListener('compositionend', (e) => {
       if (e.target.closest && e.target.closest('[data-im-field]')) {
         _imIsComposing = false;
-        // 確定後の値を state に反映し、必要なら再描画
-        onImportFieldCommit(e);
+        const el = e.target;
+        // state と人工数だけ更新 (renderImportBlocks() は呼ばない)
+        updateImportFieldValue(e);
+        // ブラウザによっては compositionend 後にフォーカスが揺らぐので、同じ入力欄に戻す
+        setTimeout(() => {
+          if (document.activeElement !== el && document.body.contains(el)) {
+            try { el.focus(); } catch {}
+          }
+        }, 0);
       }
     });
-    // フォーカスが外れたとき (Tabキー・他フィールドへのクリック) も同様に確定処理
+    // focusout: 入力欄から完全に離れたタイミング。ここで必要なら既存マッチの再描画を行う。
+    // Enterによる変換確定では焦点が外れないので、ここは呼ばれない。
     document.addEventListener('focusout', (e) => {
       if (e.target.closest && e.target.closest('[data-im-field]')) {
         // composition 中に focusout が来るブラウザもあるので、変換中はスキップ
         if (_imIsComposing) return;
-        onImportFieldCommit(e);
+        // 最新値を反映してから、必要に応じてカード再描画 (contractor/site_name/part/quantity のみ)
+        updateImportFieldValue(e);
+        refreshImportCardAfterBlur(e);
       }
     });
     // 削除ボタン
